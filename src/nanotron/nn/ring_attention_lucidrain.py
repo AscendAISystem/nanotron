@@ -716,27 +716,25 @@ def is_contiguous(x: Tensor):
     return x.stride(-1) == 1
 
 
-INSTALL_COMMAND = "pip install -U --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/Triton-Nightly/pypi/simple/ triton-nightly"
-
-# make sure triton 2.1+ is installed
-
 from importlib.metadata import version
 
 import packaging.version as pkg_version
 
 try:
-    triton_version = version("triton-nightly")
+    triton_version = version("triton")
 except:
-    print(f"latest triton must be installed. `{INSTALL_COMMAND}` first")
-    exit()
+    try:
+        triton_version = version("triton-nightly")
+    except:
+        raise ImportError("triton must be installed. `pip install triton` first")
 
 assert pkg_version.parse(triton_version) >= pkg_version.parse(
     "3.0.0"
-), f"triton must be version 3.0.0 or above. `{INSTALL_COMMAND}` to upgrade"
+), f"triton must be version 3.0.0 or above, got {triton_version}"
 
 import triton
 import triton.language as tl
-from triton.language.extra import libdevice
+
 
 # kernels
 
@@ -891,7 +889,7 @@ def _fwd_kernel(
         if SOFTCLAMP_QK_SIM:
             effective_softclamp_value = SOFTCLAMP_VALUE / softmax_scale
             qk /= effective_softclamp_value
-            qk = libdevice.tanh(qk)
+            qk = tl.math.tanh(qk)
             qk *= effective_softclamp_value
 
         if not EVEN_N:
@@ -1305,7 +1303,7 @@ def _bwd_kernel_one_col_block(
         if SOFTCLAMP_QK_SIM:
             effective_softclamp_value = SOFTCLAMP_VALUE / softmax_scale
             qk /= effective_softclamp_value
-            qk = libdevice.tanh(qk)
+            qk = tl.math.tanh(qk)
             dtanh = 1.0 - qk * qk
             qk *= effective_softclamp_value
 
