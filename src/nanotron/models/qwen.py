@@ -1,7 +1,7 @@
 from typing import Dict, List, Optional, Tuple, Union
 
 import torch
-from flash_attn.modules.mha import flash_attn_varlen_kvpacked_func
+from nanotron.nn.npu_attention import npu_flash_attn_varlen_kvpacked_func
 from torch import nn
 from torch.utils.checkpoint import CheckpointFunction
 
@@ -195,12 +195,12 @@ class Qwen2Attention(LogMixin, nn.Module):
             async_communication=tp_linear_async_communication,
         )
         if config._use_qkv_packed:
-            from nanotron.nn.rotary import FlashRotaryEmbedding
-            self.rotary_emb = FlashRotaryEmbedding(
+            from nanotron.nn.rotary_npu import RotaryEmbedding as NpuRotaryEmbedding
+            self.rotary_emb = NpuRotaryEmbedding(
                 dim=self.head_dim,
-                base=config.rope_theta,
+                max_seq_len=config.max_position_embeddings,
+                theta=config.rope_theta,
                 interleaved=config.rope_interleaved,
-                seq_len_interpolation_factor=config.rope_seq_len_interpolation_factor,
             )
         else:
             self.rotary_emb = RotaryEmbedding(
@@ -272,9 +272,11 @@ class Qwen2Attention(LogMixin, nn.Module):
         kv = kv.view(-1, seq_length, 2, self.local_num_kv_heads, self.head_dim)
         if self.config.no_rope_layer is None or (self.layer_idx + 1) % self.config.no_rope_layer != 0:
             seqlen_offset = dist.get_rank(self.cp_pg) * seq_length
-            q, kv = self.rotary_emb(
-                q, kv, seqlen_offset=seqlen_offset, max_seqlen=seq_length*self.cp_pg_size
-            )
+            k, v = kv.unbind(2)
+            position_ids_local = torch.arange(seq_length, device=q.device).unsqueeze(0).expand(q.shape[0], -1) + seqlen_offset
+            q = self.rotary_emb(q, position_ids=position_ids_local)
+            k = self.rotary_emb(k, position_ids=position_ids_local)
+            kv = torch.stack([k, v], dim=2)
         else:
             log_rank(f"skipping rotary for layer {self.layer_idx + 1}", logger=logger, level=logging.DEBUG, rank=0)
             self.sliding_window_size = None # WARNING: we skip sliding window for no-rope
@@ -307,7 +309,7 @@ class Qwen2Attention(LogMixin, nn.Module):
             assert cu_seqlens.dtype == torch.int32
             assert max_seqlen is not None
             assert isinstance(max_seqlen, int)
-            attn_output = flash_attn_varlen_kvpacked_func(
+            attn_output = npu_flash_attn_varlen_kvpacked_func(
                 q,
                 kv,
                 cu_seqlens,
@@ -317,9 +319,7 @@ class Qwen2Attention(LogMixin, nn.Module):
                 0.0,
                 softmax_scale=None,
                 causal=True,
-                alibi_slopes=None,
                 window_size=(self.sliding_window_size - 1, 0) if self.sliding_window_size is not None else (-1, -1),
-                deterministic=False,
                 return_attn_probs=self.log_attn_probs,
             )  # Not contiguous, similar to flash_attn
 

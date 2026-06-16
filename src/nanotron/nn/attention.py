@@ -4,6 +4,7 @@ from typing import Literal, Optional, Tuple
 import torch
 from packaging import version
 
+from nanotron.nn.npu_attention import npu_flash_attn_func
 from nanotron.nn.ring_attention import ring_flash_attn_varlen_func
 from nanotron.nn.llama3_ring_attention import llama3_flash_attn_varlen_qkvpacked_func
 
@@ -26,18 +27,6 @@ if is_torch_flex_attn_available():
     from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
 
-@lru_cache()
-def is_flash_attn_greater_or_equal_2_10():
-    try:
-        import flash_attn
-
-        return version.parse(flash_attn.__version__) >= version.parse("2.1.0")
-    except ImportError:
-        return False
-
-
-if is_flash_attn_greater_or_equal_2_10():
-    from flash_attn.flash_attn_interface import flash_attn_func
 # adapted from transformers.integrations.flex_attention.flex_attention_forward
 def flex_attention_forward(
     module: torch.nn.Module,
@@ -163,7 +152,7 @@ def flash_attention_forward(
     else:
         window_size = (-1, -1)
 
-    attn_output = flash_attn_func(
+    attn_output = npu_flash_attn_func(
         q=query,
         k=key,
         v=value,

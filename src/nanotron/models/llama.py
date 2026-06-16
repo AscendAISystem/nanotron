@@ -17,9 +17,11 @@
 from typing import Dict, List, Optional, Union
 
 import torch
-from flash_attn import bert_padding
-from flash_attn.flash_attn_interface import (
-    flash_attn_varlen_func,
+from nanotron.nn.npu_attention import (
+    npu_flash_attn_varlen_func,
+    npu_flash_attn_with_kvcache,
+    unpad_input,
+    pad_input,
 )
 from torch import nn
 from torch.utils.checkpoint import CheckpointFunction
@@ -273,8 +275,6 @@ class CoreAttention(nn.Module):
         q_sequence_mask: torch.Tensor,  # torch.BoolTensor [batch_size, q_length] (can be broadcasted to that size)
         kv_sequence_mask: torch.Tensor,  # torch.BoolTensor [batch_size, kv_length] (can be broadcasted to that size)
     ):
-        from flash_attn.flash_attn_interface import flash_attn_varlen_func
-
         # TODO @thomasw21: Compute once, instead of computing for each layers.
         cu_seqlens_q = torch.zeros((q_sequence_mask.shape[0] + 1), dtype=torch.int32, device=query_states.device)
         cu_seqlens_k = torch.zeros((kv_sequence_mask.shape[0] + 1), dtype=torch.int32, device=query_states.device)
@@ -288,7 +288,7 @@ class CoreAttention(nn.Module):
         # NOTE: this scale is for µTransfer,
         # in SP, we use sqrt(1/d_h)
         softmax_scale = 1 / query_states.shape[-1] if self.is_using_mup else None
-        attn_output = flash_attn_varlen_func(
+        attn_output = npu_flash_attn_varlen_func(
             q=query_states,
             k=key_states,
             v=value_states,
@@ -341,7 +341,7 @@ class CausalSelfAttention(nn.Module, AttachableStore):
         tp_pg: dist.ProcessGroup,
         layer_idx: int,
     ):
-        from flash_attn.layers.rotary import RotaryEmbedding as FlashRotaryEmbedding
+        from nanotron.nn.rotary_npu import RotaryEmbedding as NpuRotaryEmbedding
 
         super().__init__()
         # Tensor parallel considerations: We split tensors along head dimension
@@ -412,8 +412,8 @@ class CausalSelfAttention(nn.Module, AttachableStore):
         self.rope_interleaved = config.rope_interleaved
 
         # NOTE: Only supported for training (TODO(fmom): position_ids not supported yet)
-        self.flash_rotary_embedding = FlashRotaryEmbedding(
-            dim=self.d_qk, base=config.rope_theta, interleaved=config.rope_interleaved
+        self.flash_rotary_embedding = NpuRotaryEmbedding(
+            dim=self.d_qk, max_seq_len=config.max_position_embeddings, theta=config.rope_theta, interleaved=config.rope_interleaved
         )
 
         self.o_proj = TensorParallelRowLinear(
@@ -482,8 +482,6 @@ class CausalSelfAttention(nn.Module, AttachableStore):
             return self._forward_training(query_states, key_states, value_states, sequence_mask, batch_size, q_length)
 
     def _forward_inference(self, query_states, key_states, value_states, sequence_mask, batch_size, q_length, store):
-        from flash_attn.flash_attn_interface import flash_attn_with_kvcache
-
         assert key_states.requires_grad is False
         assert value_states.requires_grad is False
 
@@ -545,19 +543,19 @@ class CausalSelfAttention(nn.Module, AttachableStore):
                 )
                 # Remove pad tokens from key_states and concatenate samples in key_unpad
                 # cu_seqlens_k is the cumulative sequence lengths of key_states
-                (query_unpad, indices_q, cu_seqlens_q, max_seqlen_q) = bert_padding.unpad_input(
+                (query_unpad, indices_q, cu_seqlens_q, max_seqlen_q) = unpad_input(
                     query_states,
                     sequence_mask,
                 )
-                (key_unpad, indices_k, cu_seqlens_k, max_seqlen_k) = bert_padding.unpad_input(
+                (key_unpad, indices_k, cu_seqlens_k, max_seqlen_k) = unpad_input(
                     key_states, sequence_mask
                 )
-                (value_unpad, _, _, _) = bert_padding.unpad_input(value_states, sequence_mask)
+                (value_unpad, _, _, _) = unpad_input(value_states, sequence_mask)
 
                 # NOTE: this scale is for µTransfer,
                 # in SP, we use sqrt(1/d_h)
                 softmax_scale = 1 / query_states.shape[-1] if self.is_using_mup else None
-                output_unpad = flash_attn_varlen_func(
+                output_unpad = npu_flash_attn_varlen_func(
                     q=query_unpad,  # (total_q, n_local_q_heads, d_qk)
                     k=key_unpad,  # (total_kv, n_local_kv_heads, d_qk)
                     v=value_unpad,  # (total_kv, n_local_kv_heads, d_v)
@@ -571,7 +569,7 @@ class CausalSelfAttention(nn.Module, AttachableStore):
                     return_attn_probs=False,
                 )  # (total_unpadded, n_local_q_heads, d_v)
 
-                attention_output = bert_padding.pad_input(
+                attention_output = pad_input(
                     output_unpad, indices_q, batch_size, q_length
                 )  # (batch_size, q_length, n_local_q_heads, d_v)
 
@@ -643,7 +641,7 @@ class CausalSelfAttention(nn.Module, AttachableStore):
                 # NOTE: this scale is for µTransfer,
                 # in SP, we use sqrt(1/d_h)
                 softmax_scale = 1 / query_states.shape[-1] if self.is_using_mup else None
-                attention_output = flash_attn_with_kvcache(
+                attention_output = npu_flash_attn_with_kvcache(
                     query_states,
                     k_cache,
                     v_cache,
@@ -681,9 +679,11 @@ class CausalSelfAttention(nn.Module, AttachableStore):
         key_value_states = torch.cat([key_states.unsqueeze(0), value_states.unsqueeze(0)], dim=0)
         # [batch_size, seq_length, 2, num_heads, d_qk]
         key_value_states = key_value_states.permute(1, 2, 0, 3, 4).contiguous()
-        query_states, key_value_states = self.flash_rotary_embedding(query_states, kv=key_value_states)
-        # [batch_size, seq_length, num_heads, d_qk]
         key_states, value_states = torch.split(key_value_states, 1, dim=2)
+        seq_len = query_states.shape[1]
+        position_ids = torch.arange(seq_len, device=query_states.device).unsqueeze(0).expand(query_states.shape[0], -1)
+        query_states = self.flash_rotary_embedding(query_states, position_ids=position_ids)
+        key_states = self.flash_rotary_embedding(key_states.squeeze(2), position_ids=position_ids).unsqueeze(2)
 
         q_sequence_mask = sequence_mask
         kv_sequence_mask = sequence_mask

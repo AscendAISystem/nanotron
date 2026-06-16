@@ -55,6 +55,12 @@ from nanotron.parallel.tensor_parallel.nn import (
 )
 from nanotron.parallel.tied_parameters import tie_parameters
 from nanotron.npu_compat import get_default_device
+from nanotron.nn.npu_attention import (
+    npu_flash_attn_varlen_func,
+    npu_flash_attn_with_kvcache,
+    unpad_input,
+    pad_input,
+)
 from nanotron.random import RandomStates, branch_random_state
 from nanotron.utils import checkpoint_method
 
@@ -221,9 +227,7 @@ class CoreAttention(nn.Module):
 
     def __init__(self, config: Starcoder2Config, parallel_config: Optional[ParallelismArgs], layer_idx: int):
         super().__init__()
-        from flash_attn.flash_attn_interface import flash_attn_varlen_func
-
-        _flash_supports_window_size = "window_size" in list(inspect.signature(flash_attn_varlen_func).parameters)
+        _flash_supports_window_size = "window_size" in list(inspect.signature(npu_flash_attn_varlen_func).parameters)
 
         assert (
             config.hidden_size % config.num_attention_heads == 0
@@ -255,8 +259,6 @@ class CoreAttention(nn.Module):
         q_sequence_mask: torch.Tensor,  # torch.BoolTensor [batch_size, q_length] (can be broadcasted to that size)
         kv_sequence_mask: torch.Tensor,  # torch.BoolTensor [batch_size, kv_length] (can be broadcasted to that size)
     ):
-        from flash_attn.flash_attn_interface import flash_attn_varlen_func
-
         # TODO @thomasw21: Compute once, instead of computing for each layers.
         cu_seqlens_q = torch.zeros((q_sequence_mask.shape[0] + 1), dtype=torch.int32, device=query_states.device)
         cu_seqlens_k = torch.zeros((kv_sequence_mask.shape[0] + 1), dtype=torch.int32, device=query_states.device)
@@ -266,7 +268,7 @@ class CoreAttention(nn.Module):
         # TODO(kunhao): flash attn's causal means that the query can only attend to the keys before it. This is not
         # what we want if we are using kv cache. This is a hack as we always have q_length == 1 when using kv cache.
         causal = False if q_sequence_mask.shape[1] == 1 else True
-        attn_output = flash_attn_varlen_func(
+        attn_output = npu_flash_attn_varlen_func(
             q=query_states,
             k=key_states,
             v=value_states,
@@ -681,12 +683,6 @@ class CausalSelfMQA(nn.Module, AttachableStore):
         hidden_states,  # [seq_length, batch_size, hidden_dim]
         sequence_mask,  # [batch_size, seq_length]
     ):
-        from flash_attn import bert_padding
-        from flash_attn.flash_attn_interface import (
-            flash_attn_varlen_func,
-            flash_attn_with_kvcache,
-        )
-
         batch_size = hidden_states.shape[1]
 
         def unshape(states):
@@ -786,16 +782,16 @@ class CausalSelfMQA(nn.Module, AttachableStore):
                 )
                 # Remove pad tokens from key_states and concatenate samples in key_unpad
                 # cu_seqlens_k is the cumulative sequence lengths of key_states
-                (query_unpad, indices_q, cu_seqlens_q, max_seqlen_q) = bert_padding.unpad_input(
+                (query_unpad, indices_q, cu_seqlens_q, max_seqlen_q) = unpad_input(
                     query_states,
                     sequence_mask,
                 )
-                (key_unpad, indices_k, cu_seqlens_k, max_seqlen_k) = bert_padding.unpad_input(
+                (key_unpad, indices_k, cu_seqlens_k, max_seqlen_k) = unpad_input(
                     key_states, sequence_mask
                 )
-                (value_unpad, _, _, _) = bert_padding.unpad_input(value_states, sequence_mask)
+                (value_unpad, _, _, _) = unpad_input(value_states, sequence_mask)
 
-                output_unpad = flash_attn_varlen_func(
+                output_unpad = npu_flash_attn_varlen_func(
                     q=query_unpad,  # (total_q, n_heads, d_qk)
                     k=key_unpad,  # (total_kv, 1, d_qk)
                     v=value_unpad,  # (total_kv, 1, d_v)
@@ -809,7 +805,7 @@ class CausalSelfMQA(nn.Module, AttachableStore):
                     return_attn_probs=False,
                 )  # (total_unpadded, n_local_q_heads, d_v)
 
-                attention_output = bert_padding.pad_input(
+                attention_output = pad_input(
                     output_unpad, indices_q, batch_size, q_length
                 )  # (batch_size, q_length, n_local_q_heads, d_v)
 
@@ -830,7 +826,7 @@ class CausalSelfMQA(nn.Module, AttachableStore):
                 key_states = key_states.view(batch_size, kv_length, 1, self.d_qk)  # [batch_size, kv_length, 1, d_qk]
                 value_states = value_states.view(batch_size, kv_length, 1, self.d_v)  # [batch_size, kv_length, 1, d_v]
 
-                attention_output = flash_attn_with_kvcache(
+                attention_output = npu_flash_attn_with_kvcache(
                     query_states,
                     k_cache,
                     v_cache,
@@ -961,12 +957,6 @@ class CausalSelfGQA(nn.Module, AttachableStore):
         hidden_states,  # (seq_length, batch_size, hidden_size)
         sequence_mask,  # (batch_size, seq_length)
     ):
-        from flash_attn import bert_padding
-        from flash_attn.flash_attn_interface import (
-            flash_attn_varlen_func,
-            flash_attn_with_kvcache,
-        )
-
         fused_qkv = self.query_key_value(
             hidden_states
         )  # [seq_length, batch_size, n_local_q_heads * head_dim + 2 * n_local_kv_heads * head_dim]
@@ -1027,16 +1017,16 @@ class CausalSelfGQA(nn.Module, AttachableStore):
                 )
                 # Remove pad tokens from key_states and concatenate samples in key_unpad
                 # cu_seqlens_k is the cumulative sequence lengths of key_states
-                (query_unpad, indices_q, cu_seqlens_q, max_seqlen_q) = bert_padding.unpad_input(
+                (query_unpad, indices_q, cu_seqlens_q, max_seqlen_q) = unpad_input(
                     query_states,
                     sequence_mask,
                 )
-                (key_unpad, indices_k, cu_seqlens_k, max_seqlen_k) = bert_padding.unpad_input(
+                (key_unpad, indices_k, cu_seqlens_k, max_seqlen_k) = unpad_input(
                     key_states, sequence_mask
                 )
-                (value_unpad, _, _, _) = bert_padding.unpad_input(value_states, sequence_mask)
+                (value_unpad, _, _, _) = unpad_input(value_states, sequence_mask)
 
-                output_unpad = flash_attn_varlen_func(
+                output_unpad = npu_flash_attn_varlen_func(
                     q=query_unpad,  # (total_q, self.n_local_q_heads, d_qk)
                     k=key_unpad,  # (total_kv, self.n_local_kv_heads, d_qk)
                     v=value_unpad,  # (total_kv, self.n_local_kv_heads, d_v)
@@ -1050,7 +1040,7 @@ class CausalSelfGQA(nn.Module, AttachableStore):
                     return_attn_probs=False,
                 )  # (total_unpadded, n_local_q_heads, d_v)
 
-                attention_output = bert_padding.pad_input(
+                attention_output = pad_input(
                     output_unpad, indices_q, batch_size, q_length
                 )  # (batch_size, q_length, n_local_q_heads, d_v)
 
@@ -1075,7 +1065,7 @@ class CausalSelfGQA(nn.Module, AttachableStore):
                     batch_size, kv_length, self.n_local_kv_heads, self.head_dim
                 )  # [batch_size, kv_length, self.n_local_kv_heads, self.head_dim]
 
-                attention_output = flash_attn_with_kvcache(
+                attention_output = npu_flash_attn_with_kvcache(
                     query_states,
                     k_cache,
                     v_cache,

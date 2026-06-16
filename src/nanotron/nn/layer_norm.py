@@ -1,6 +1,33 @@
 import torch
-from flash_attn.ops.triton.layer_norm import layer_norm_fn
+import torch.nn.functional as F
 from torch import nn
+
+try:
+    from flash_attn.ops.triton.layer_norm import layer_norm_fn
+except ImportError:
+
+    def layer_norm_fn(
+        x, weight, bias=None, residual=None, eps=1e-5, dropout_p=0.0,
+        prenorm=False, residual_in_fp32=False, is_rms_norm=False,
+        return_dropout_mask=False,
+    ):
+        if dropout_p > 0.0:
+            raise NotImplementedError("Dropout in layer_norm fallback not supported")
+        if is_rms_norm:
+            input_dtype = x.dtype
+            x = x.to(torch.float32)
+            variance = x.pow(2).mean(-1, keepdim=True)
+            x = x * torch.rsqrt(variance + eps)
+            x = weight * x.to(input_dtype)
+        else:
+            x = F.layer_norm(x, x.shape[-1:], weight, bias, eps)
+        if residual is not None:
+            if residual_in_fp32:
+                residual = residual.to(torch.float32)
+            x = (x + residual).to(x.dtype)
+        if prenorm:
+            return x, residual
+        return x
 
 
 class TritonLayerNorm(nn.LayerNorm):

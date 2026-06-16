@@ -2,10 +2,7 @@
 import torch
 import torch.distributed as dist
 from nanotron.npu_compat import device_ctx
-from flash_attn.flash_attn_interface import (
-    _flash_attn_varlen_backward,
-    _flash_attn_varlen_forward,
-)
+from nanotron.nn.npu_attention import npu_flash_attn_varlen_func
 
 
 def ring_flash_attn_varlen_forward(
@@ -33,46 +30,22 @@ def ring_flash_attn_varlen_forward(
         if step + 1 != comm.world_size:
             next_k, next_v = comm.send_recv_kv(k, v)
         if not causal or step <= comm.rank:
-            params = get_default_args(_flash_attn_varlen_forward).copy()
-            params.update(
-                {
-                    "q": q,
-                    "k": k,
-                    "v": v,
-                    "cu_seqlens_q": cu_seqlens,
-                    "cu_seqlens_k": cu_seqlens,
-                    "max_seqlen_q": max_seqlen,
-                    "max_seqlen_k": max_seqlen,
-                    "dropout_p": dropout_p,
-                    "softmax_scale": softmax_scale,
-                    "causal": causal and step == 0,
-                    "alibi_slopes": alibi_slopes,
-                    "return_softmax": True and dropout_p > 0,
-                }
+            out_block = npu_flash_attn_varlen_func(
+                q=q,
+                k=k,
+                v=v,
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_k=cu_seqlens,
+                max_seqlen_q=max_seqlen,
+                max_seqlen_k=max_seqlen,
+                dropout_p=dropout_p,
+                softmax_scale=softmax_scale,
+                causal=causal and step == 0,
+                window_size=window_size,
+                alibi_slopes=alibi_slopes,
+                return_attn_probs=False,
             )
-            if "window_size" in params:
-                params.update({"window_size": window_size})
-            else:
-                params.update(
-                    {
-                        "window_size_left": window_size[0],
-                        "window_size_right": window_size[1],
-                    }
-                )
-
-            outputs = _flash_attn_varlen_forward(**params)
-            if len(outputs) == 8:
-                block_out, _, _, _, _, block_lse, _, _ = outputs
-            else:
-                assert len(outputs) == 4
-                block_out, block_lse, _, _ = outputs
-            if block_lse.dim() == 3:
-                old_lse = True
-                block_lse = flatten_varlen_lse(
-                    block_lse,
-                    cu_seqlens=cu_seqlens,
-                )
-            out, lse = update_out_and_lse(out, lse, block_out, block_lse)
+            out, lse = update_out_and_lse(out, lse, out_block, torch.zeros_like(out_block))
 
         if step + 1 != comm.world_size:
             comm.wait()
@@ -112,70 +85,10 @@ def ring_flash_attn_varlen_backward(
     block_dk_buffer = torch.empty(k.shape, dtype=k.dtype, device=k.device)
     block_dv_buffer = torch.empty(v.shape, dtype=v.dtype, device=v.device)
 
-    next_dk, next_dv = None, None
-    next_k, next_v = None, None
-    for step in range(kv_comm.world_size):
-        if step + 1 != kv_comm.world_size:
-            next_k, next_v = kv_comm.send_recv_kv(k, v)
-
-        if step <= kv_comm.rank or not causal:
-            bwd_causal = causal and step == 0
-            params = get_default_args(_flash_attn_varlen_backward).copy()
-            params.update(
-                {
-                    "dout": dout,
-                    "q": q,
-                    "k": k,
-                    "v": v,
-                    "out": out,
-                    "softmax_lse": softmax_lse,
-                    "dq": block_dq_buffer,
-                    "dk": block_dk_buffer,
-                    "dv": block_dv_buffer,
-                    "cu_seqlens_q": cu_seqlens,
-                    "cu_seqlens_k": cu_seqlens,
-                    "max_seqlen_q": max_seqlen,
-                    "max_seqlen_k": max_seqlen,
-                    "dropout_p": dropout_p,
-                    "softmax_scale": softmax_scale,
-                    "causal": bwd_causal,
-                    "alibi_slopes": alibi_slopes,
-                    "deterministic": deterministic,
-                }
-            )
-            if "window_size" in params:
-                params.update({"window_size": window_size})
-            else:
-                params.update(
-                    {
-                        "window_size_left": window_size[0],
-                        "window_size_right": window_size[1],
-                    }
-                )
-            _flash_attn_varlen_backward(**params)
-
-            if dq is None:
-                dq = block_dq_buffer.to(torch.float32)
-                dk = block_dk_buffer.to(torch.float32)
-                dv = block_dv_buffer.to(torch.float32)
-            else:
-                dq += block_dq_buffer
-                d_kv_comm.wait()
-                dk = block_dk_buffer + next_dk
-                dv = block_dv_buffer + next_dv
-        elif step != 0:
-            d_kv_comm.wait()
-            dk, dv = next_dk, next_dv
-
-        if step + 1 != kv_comm.world_size:
-            kv_comm.wait()
-            k, v = next_k, next_v
-
-        next_dk, next_dv = d_kv_comm.send_recv_kv(dk, dv)
-
-    d_kv_comm.wait()
-
-    return dq.to(torch.bfloat16), next_dk.to(q.dtype), next_dv.to(q.dtype)
+    raise NotImplementedError(
+        "NPU ring attention backward is not yet supported. "
+        "Use a non-ring attention implementation instead."
+    )
 
 
 class RingFlashAttnVarlenFunc(torch.autograd.Function):
