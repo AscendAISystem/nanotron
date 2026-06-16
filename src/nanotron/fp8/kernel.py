@@ -1,9 +1,8 @@
 import torch
-import transformer_engine as te  # noqa
-import transformer_engine_extensions as tex
 
 from nanotron.fp8.tensor import FP8Tensor
 from nanotron.fp8.meta import FP8Meta
+from nanotron.npu_compat import disable_fp8, is_npu_available
 
 
 @torch.no_grad()
@@ -14,6 +13,12 @@ def fp8_matmul_kernel(
     transpose_b: bool,
     use_split_accumulator: bool,
 ) -> torch.Tensor:
+    if is_npu_available():
+        raise NotImplementedError("FP8 kernel is not supported on NPU")
+
+    import transformer_engine as te  # noqa
+    import transformer_engine_extensions as tex
+
     assert (
         mat_a.device != "cpu" and mat_b.device != "cpu"
     ), "The tensors must be on a CUDA device in order to use the FP8 kernel!!"

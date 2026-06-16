@@ -20,6 +20,8 @@ from typing import (
 import torch
 from typing_extensions import TypeAlias
 
+from nanotron.npu_compat import is_npu_available
+
 Args: TypeAlias = Tuple[Any, ...]
 Kwargs: TypeAlias = Dict[str, Any]
 StateDict: TypeAlias = Dict[str, Any]
@@ -90,6 +92,9 @@ def _process_value_according_to_param_policy(
             fused = pg["fused"] if "fused" in pg else False
             capturable = pg["capturable"] if "capturable" in pg else False
             break
+
+    if not fused and "fused" not in pg and is_npu_available():
+        fused = True
 
     if key == "step":
         if capturable or fused:

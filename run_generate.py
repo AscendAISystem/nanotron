@@ -3,7 +3,7 @@ Nanotron Inference Script
 
 Usage:
 ```
-export CUDA_DEVICE_MAX_CONNECTIONS=1 # important for some distributed operations
+export CUDA_DEVICE_MAX_CONNECTIONS=1 # important for some distributed operations (CUDA-only)
 torchrun --nproc_per_node=1 run_generate.py --ckpt-path checkpoints/10
 ```
 """
@@ -30,6 +30,7 @@ from nanotron.generation.decode import (
 from nanotron.logging import log_rank, set_ranks_logging_level
 from nanotron.models import build_model
 from nanotron.parallel import ParallelContext
+from nanotron.npu_compat import get_default_device
 from nanotron.parallel.parameters import sanity_check
 from nanotron.parallel.pipeline_parallel.engine import (
     OneForwardOneBackwardPipelineEngine,
@@ -217,9 +218,10 @@ def main():
                 rank=0,
             )
     else:
+        _default_device = get_default_device()
         outputs = decode_tokenized(
-            input_ids=torch.zeros(1, 1).to(dtype=torch.int64, device="cuda"),
-            input_mask=torch.ones(1, 1).to(dtype=torch.bool, device="cuda"),
+            input_ids=torch.zeros(1, 1, dtype=torch.int64, device=_default_device),
+            input_mask=torch.ones(1, 1, dtype=torch.bool, device=_default_device),
             model=model.model,
             parallel_context=parallel_context,
             generation_config=GenerationArgs(sampler="greedy", use_cache=True),

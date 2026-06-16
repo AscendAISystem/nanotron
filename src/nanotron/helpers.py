@@ -45,7 +45,7 @@ from nanotron.random import (
 from nanotron.scaling.parametrization import LearningRateForSP, LearningRateForSpectralMup, ParametrizationMethod
 from nanotron.serialize import DataStageMetadata
 from nanotron.serialize.metadata import TrainingMetadata
-from nanotron.npu_compat import device_mod, empty_cache, synchronize, memory_allocated, max_memory_allocated, max_memory_reserved, device_count, get_default_device
+from nanotron.npu_compat import device_mod, empty_cache, synchronize, memory_allocated, max_memory_allocated, max_memory_reserved, device_count, get_default_device, is_npu_available
 
 logger = logging.get_logger(__name__)
 
@@ -358,6 +358,19 @@ def init_optimizer_and_grad_accumulator(
         if optimizer_args.optimizer_factory.name == "adamW":
 
             def optimizer(param_groups):
+                if is_npu_available():
+                    import torch_npu
+
+                    return torch_npu.optim.NpuFusedAdamW(
+                        param_groups,
+                        lr=optimizer_args.learning_rate_scheduler.learning_rate,
+                        weight_decay=optimizer_args.weight_decay,
+                        eps=optimizer_args.optimizer_factory.adam_eps,
+                        betas=(
+                            optimizer_args.optimizer_factory.adam_beta1,
+                            optimizer_args.optimizer_factory.adam_beta2,
+                        ),
+                    )
                 return torch.optim.AdamW(
                     param_groups,
                     lr=optimizer_args.learning_rate_scheduler.learning_rate,

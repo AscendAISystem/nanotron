@@ -2,8 +2,9 @@ from typing import Optional, Tuple, TypedDict, Union
 
 import torch
 import torch.nn.functional as F
-import transformer_engine as te  # noqa
 from torch import nn
+
+from nanotron.npu_compat import is_npu_available
 
 from nanotron.fp8.constants import INITIAL_AMAX, INITIAL_SCALING_FACTOR
 from nanotron.fp8.dtypes import DTypes
@@ -25,6 +26,9 @@ class FP8Linear(nn.Linear):
     def __init__(self, in_features: int, out_features: int, bias: bool = True, device: Optional[torch.device] = None):
         super().__init__(in_features, out_features, bias, device)
         # TODO(xrsrke): add device, and 2 fp8 dtypes
+        if is_npu_available():
+            return
+        import transformer_engine as te  # noqa
         if self.weight.device != torch.device("cpu"):
             self.weight = FP8Parameter(self.weight, dtype=DTypes.FP8E4M3)
 
@@ -50,6 +54,9 @@ class FP8Linear(nn.Linear):
 
     def forward(self, input: Union[FP8Tensor, torch.Tensor]) -> torch.Tensor:
         # NOTE: only do fp8 kernel if both input and weight are on CUDA device
+        if is_npu_available():
+            return F.linear(input, self.weight, self.bias)
+        import transformer_engine as te  # noqa
         if input.device == torch.device("cpu") or self.weight.device == torch.device("cpu"):
             return F.linear(input, self.weight, self.bias)
 

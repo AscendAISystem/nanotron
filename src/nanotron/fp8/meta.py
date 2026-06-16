@@ -2,11 +2,9 @@ from dataclasses import dataclass
 from typing import Union
 
 import torch
-import transformer_engine as te  # noqa
-import transformer_engine_extensions as tex
 
 from nanotron.fp8.constants import DTYPE_TO_FP8_MAX
-from nanotron.npu_compat import get_default_device
+from nanotron.npu_compat import get_default_device, is_npu_available
 from nanotron.fp8.tensor import convert_torch_dtype_to_te_dtype
 
 
@@ -21,7 +19,8 @@ class FP8Meta:
     dtype: torch.dtype
 
     @property
-    def te_dtype(self) -> tex.DType:
+    def te_dtype(self):
+        import transformer_engine_extensions as tex
         return convert_torch_dtype_to_te_dtype(self.dtype)
 
     def __post_init__(self):

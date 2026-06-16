@@ -1,15 +1,20 @@
 import torch
-import transformer_engine as te  # noqa
-import transformer_engine_extensions as tex
 
 from nanotron.fp8.constants import DTYPE_TO_FP8_MAX, FP8_DTYPES, INITIAL_SCALING_FACTOR
 from nanotron.fp8.dtypes import DTypes
+from nanotron.npu_compat import is_npu_available
 
 
 class FP8Tensor(torch.Tensor):
     """FP8 Tensor."""
 
     def __new__(cls, tensor: torch.Tensor, dtype: DTypes) -> torch.Tensor:
+        if is_npu_available():
+            raise NotImplementedError("FP8 is not supported on NPU")
+
+        import transformer_engine as te  # noqa
+        import transformer_engine_extensions as tex
+
         assert isinstance(tensor, torch.Tensor), "tensor must be a tensor"
         assert tensor.dtype not in FP8_DTYPES, "The tensor already quantized to FP8"
         
@@ -36,7 +41,8 @@ class FP8Tensor(torch.Tensor):
         return f"FP8Tensor({self}, fp8_meta={self.fp8_meta})"
 
 
-def convert_torch_dtype_to_te_dtype(dtype: torch.dtype) -> tex.DType:
+def convert_torch_dtype_to_te_dtype(dtype: torch.dtype) -> object:
+    import transformer_engine_extensions as tex
     # NOTE: transformer engine maintains it own dtype mapping
     # so we need to manually map torch dtypes to TE dtypes
     TORCH_DTYPE_TE_DTYPE_NAME_MAPPING = {
@@ -58,6 +64,7 @@ def convert_torch_dtype_to_te_dtype(dtype: torch.dtype) -> tex.DType:
 # TODO(xrsrke): add type hint for meta after fixing
 # circular import between tensor.py and meta.py
 def convert_tensor_to_fp8(tensor: torch.Tensor, meta) -> FP8Tensor:
+    import transformer_engine_extensions as tex
     te_dtype = convert_torch_dtype_to_te_dtype(meta.dtype)
     # TODO(xrsrke): after casting to fp8, update the scaling factor
     # TODO(xrsrke): it's weird that TE only take inverse_scale equal to 1
@@ -66,6 +73,7 @@ def convert_tensor_to_fp8(tensor: torch.Tensor, meta) -> FP8Tensor:
 
 
 def convert_tensor_from_fp8(tensor: torch.Tensor, meta, dtype: torch.dtype) -> torch.Tensor:
+    import transformer_engine_extensions as tex
     assert isinstance(tensor, torch.Tensor)
     assert isinstance(dtype, torch.dtype)
     tensor_dtype = convert_torch_dtype_to_te_dtype(meta.dtype)
