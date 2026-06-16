@@ -11,6 +11,7 @@ from torch import nn
 from tqdm import tqdm
 
 from nanotron import distributed as dist
+from nanotron.npu_compat import get_default_device, synchronize, empty_cache, device_mod
 from nanotron import logging
 from nanotron.distributed import ProcessGroup
 from nanotron.logging import human_format, log_rank, warn_once
@@ -450,7 +451,7 @@ def merge_dp_shard_in_zero1_optimizer(
             )
             merged_dp_shards_optim_states["state"][optim_state_index] = {}
             for state_name in optimizer_state_names:
-                unsharded_dp_buffer = torch.zeros(unshard_dp_size, device="cuda")
+                unsharded_dp_buffer = torch.zeros(unshard_dp_size, device=get_default_device())
                 # NOTE: now merge all the params across data parallel dimension
                 for dp_rank, ckp_optim_state in filtered_ckp_sharded_optim_states.items():
                     # NOTE: extract the optimizer state of the current parameter

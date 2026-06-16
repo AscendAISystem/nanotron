@@ -38,6 +38,7 @@ from nanotron.parallel.tensor_parallel.functional import (
     column_linear,
     row_linear,
 )
+from nanotron.npu_compat import is_npu_available
 from nanotron.parallel.tied_parameters import create_tied_parameter
 
 logger = get_logger(__name__)
@@ -78,9 +79,10 @@ class TensorParallelColumnLinear(nn.Linear):
         self.async_communication = async_communication
 
         if self.world_size > 1:
-            assert (
-                os.environ.get("CUDA_DEVICE_MAX_CONNECTIONS", None) == "1"
-            ), "Env variable CUDA_DEVICE_MAX_CONNECTIONS should be set to 1 when using TP>1"
+            if not is_npu_available():
+                assert (
+                    os.environ.get("CUDA_DEVICE_MAX_CONNECTIONS", None) == "1"
+                ), "Env variable CUDA_DEVICE_MAX_CONNECTIONS should be set to 1 when using TP>1"
 
         if contiguous_chunks is not None:
             assert (

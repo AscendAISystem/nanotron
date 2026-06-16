@@ -10,6 +10,7 @@ from nanotron import logging
 from nanotron.config import ParallelismArgs
 from nanotron.config.models_config import Qwen2Config
 from nanotron.models.base import ignore_init_on_device_and_dtype
+from nanotron.npu_compat import get_default_device
 from nanotron.nn.activations import ACT2FN
 
 logger = logging.get_logger(__name__)
@@ -41,7 +42,7 @@ class Router(nn.Module):
         # https://github.com/huggingface/transformers/blob/27a25bee4fcb865e8799ba026f1ea4455f2cca98/src/transformers/models/qwen2_moe/modeling_qwen2_moe.py#L608
         with ignore_init_on_device_and_dtype():
             self.weight = nn.Parameter(
-                torch.randn(self.num_experts, config.hidden_size, dtype=torch.float32, device="cuda")
+                torch.randn(self.num_experts, config.hidden_size, dtype=torch.float32, device=get_default_device())
             )
         assert self.weight.dtype == torch.float32
 

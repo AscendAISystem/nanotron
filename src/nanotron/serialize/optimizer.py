@@ -10,6 +10,7 @@ from tqdm import tqdm
 
 from nanotron import distributed as dist
 from nanotron import optim
+from nanotron.npu_compat import empty_cache, get_default_device
 from nanotron.optim.zero import (
     ZeroDistributedOptimizer,
     extract_parallel_ranks_from_shard_path,
@@ -133,16 +134,16 @@ def state_dict_to_device(state_dict: Dict, device: str) -> Dict:
     assert (
         state_dict["state"][0]["exp_avg"].device.type == "cpu"
     ), "Optimizer states should be on CPU to avoid extra memory usage when loading from checkpoint"
-    torch.cuda.empty_cache()
+    empty_cache()
 
     for _, optim_state in sorted(state_dict["state"].items(), key=lambda x: x[0]):
         for name, tensor in optim_state.items():
             optim_state[name] = tensor.to(device)
 
     assert (
-        state_dict["state"][0]["exp_avg"].device.type == "cuda"
+        state_dict["state"][0]["exp_avg"].device.type == get_default_device().type
     ), "Optimizer states should be on GPU because model is on GPU"
-    torch.cuda.empty_cache()
+    empty_cache()
 
 
 @torch.no_grad()

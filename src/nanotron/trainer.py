@@ -101,6 +101,7 @@ from nanotron.serialize import (
 )
 from nanotron.serialize.metadata import DataStageMetadata, TrainingMetadata
 from nanotron.serialize.optimizer import load_optimizer, state_dict_to_device
+from nanotron.npu_compat import device_mod, empty_cache, synchronize, memory_allocated, max_memory_allocated, max_memory_reserved, device_count, get_default_device
 
 logger = logging.get_logger(__name__)
 
@@ -546,7 +547,7 @@ class DistributedTrainer:
         prof = get_profiler(config=self.config)
         # free memory
         gc.collect()
-        torch.cuda.empty_cache()
+        empty_cache()
         with prof:
             for self.iteration_step in range(self.initial_iter_step, self.last_iter_step + 1):
                 if isinstance(prof, torch.profiler.profile):
@@ -703,7 +704,7 @@ class DistributedTrainer:
             and self.config.checkpoints.load_optimizer
             and self.iteration_step == self.initial_iter_step
         ):
-            state_dict_to_device(self.optimizer.state_dict(), "cuda")
+            state_dict_to_device(self.optimizer.state_dict(), get_default_device())
 
         before_optim_step_sanity_checks(
             self.config, self.parallel_context, self.unwrapped_model, self.grad_accumulator, self.optimizer
@@ -924,10 +925,10 @@ class DistributedTrainer:
             all_log_entries.extend(
                 [
                     LogItem(
-                        "cuda_memory_allocated", torch.cuda.memory_allocated(), "human_format"
+                        "cuda_memory_allocated", memory_allocated(), "human_format"
                     ),  #  / 1024**2, ".2f"),
                     LogItem(
-                        "cuda_max_memory_reserved", torch.cuda.max_memory_reserved(), "human_format"
+                        "cuda_max_memory_reserved", max_memory_reserved(), "human_format"
                     ),  #  / 1024**2, ".2f"),
                     LogItem("hd_total_memory_tb", total, "human_format"),  #  / (2**40), ".2f"),
                     LogItem("hd_used_memory_tb", used, "human_format"),  #  / (2**40), ".2f"),
@@ -1114,8 +1115,8 @@ class DistributedTrainer:
         # count number of parameters
         num_params = sum(p.numel() for p in model.parameters())
         size_params = sum(p.numel() * p.element_size() for p in model.parameters())
-        total_params = torch.tensor(num_params, device="cuda")
-        total_size = torch.tensor(size_params, device="cuda")
+        total_params = torch.tensor(num_params, device=get_default_device())
+        total_size = torch.tensor(size_params, device=get_default_device())
         dist.all_reduce(total_params, group=parallel_context.tp_pg, async_op=False, op=dist.ReduceOp.SUM)  # TP
         dist.all_reduce(total_params, group=parallel_context.pp_pg, async_op=False, op=dist.ReduceOp.SUM)  # PP
         dist.all_reduce(total_size, group=parallel_context.tp_pg, async_op=False, op=dist.ReduceOp.SUM)
@@ -1139,9 +1140,9 @@ class DistributedTrainer:
             rank=0,
         )
         log_rank(
-            f"[After model building] Memory usage: {torch.cuda.memory_allocated() / 1024**2:.2f}MiB."
-            f" Peak allocated: {torch.cuda.max_memory_allocated() / 1024**2:.2f}MiB"
-            f" Peak reserved: {torch.cuda.max_memory_reserved() / 1024**2:.2f}MiB",
+            f"[After model building] Memory usage: {memory_allocated() / 1024**2:.2f}MiB."
+            f" Peak allocated: {max_memory_allocated() / 1024**2:.2f}MiB"
+            f" Peak reserved: {max_memory_reserved() / 1024**2:.2f}MiB",
             logger=logger,
             level=logging.INFO,
             group=parallel_context.dp_pg,

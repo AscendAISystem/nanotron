@@ -7,6 +7,7 @@ import torch
 from tqdm import tqdm
 
 from nanotron import distributed as dist
+from nanotron.npu_compat import get_default_device, synchronize, empty_cache, device_mod
 from nanotron import logging
 from nanotron.config import BenchArgs, GenerationArgs
 from nanotron.distributed import ProcessGroup, get_global_rank
@@ -114,8 +115,8 @@ def micro_batcher(
                 # pad_to_multiple_of=8
             )
 
-            encodings["attention_mask"] = encodings.attention_mask.to(dtype=torch.bool, device="cuda")
-            encodings.to("cuda")
+            encodings["attention_mask"] = encodings.attention_mask.to(dtype=torch.bool, device=get_default_device())
+            encodings.to(get_default_device())
             yield GenerationInputs(input_ids=encodings.input_ids, input_masks=encodings.attention_mask)
         else:
             yield GenerationInputs(
@@ -147,8 +148,8 @@ def micro_splitter(
         #     continue
 
         if dist.get_rank(parallel_context.pp_pg) == input_rank:
-            micro_batch_mask = micro_batch_mask.to(dtype=torch.bool, device="cuda")
-            micro_batch_mask.to("cuda")
+            micro_batch_mask = micro_batch_mask.to(dtype=torch.bool, device=get_default_device())
+            micro_batch_mask.to(get_default_device())
             yield GenerationInputs(input_ids=micro_batch_ids.clone(), input_masks=micro_batch_mask.clone())
         else:
             yield GenerationInputs(
@@ -280,7 +281,7 @@ def decode_text(
             for generation_iter in tqdm(range(max_new_tokens), desc="Generating"):
 
                 if is_bench and generation_iter == 0:
-                    torch.cuda.synchronize()
+                    synchronize()
                     elapsed_time_first_iteration = start_time - time.perf_counter()
 
                 all_new_decoder_input_ids_and_mask_same_rank: List[
@@ -434,7 +435,7 @@ def decode_text(
 
             if is_bench:
                 # Compute throughput (tok/s/gpu). Note that the first generation is done with full seq_len, so we don't count it.
-                torch.cuda.synchronize()
+                synchronize()
                 total_time_sec = time.perf_counter() - start_time - elapsed_time_first_iteration
                 # We generate 1 token per iteration per batch (batch=microbatch)
                 # Number of tokens generated every iteration: gbs/iteration_time
@@ -848,7 +849,7 @@ def broadcast_tensors(
             storage_offset=storage_offset,
         )
         if dist.get_rank(group) != group_src:
-            tensor = meta.create_empty_storage(device=torch.device("cuda"))
+            tensor = meta.create_empty_storage(device=get_default_device())
         else:
             tensor = view_as_contiguous(tensor)
         dist.broadcast(tensor, src=get_global_rank(group_rank=group_src, group=group), group=group)

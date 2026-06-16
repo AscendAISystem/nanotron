@@ -9,6 +9,7 @@ from typing import Optional, Union
 
 import torch
 from datasets.download.streaming_download_manager import xPath
+from nanotron.npu_compat import get_default_device
 from filelock import FileLock, Timeout
 
 from nanotron import distributed as dist
@@ -203,7 +204,7 @@ class S3Mover:
         if group is None:
             group = dist.torch_dist.distributed_c10d._get_default_group()
 
-        test_tensor = torch.tensor([self.is_previous_save_finished()], device=torch.device("cuda"))
+        test_tensor = torch.tensor([self.is_previous_save_finished()], device=get_default_device())
         test_tensor_list = [torch.zeros_like(test_tensor) for _ in range(group.size())]
         dist.all_gather(test_tensor_list, test_tensor, group=group, async_op=False)
         dist.barrier()
@@ -220,7 +221,7 @@ class S3Mover:
                     f"[S3] Waiting {self.state.value}: {all_saved} / {group.size()}. Stdout: {len(stdout_lines)} end: {stdout_lines[-1:]}",
                 )
             # sync all our saves on NCCL we could do a dist barrier later but this helps us not losing NCCL connections down the line
-            test_tensor = torch.tensor([self.is_previous_save_finished()], device=torch.device("cuda"))
+            test_tensor = torch.tensor([self.is_previous_save_finished()], device=get_default_device())
             test_tensor_list = [torch.zeros_like(test_tensor) for _ in range(group.size())]
             dist.all_gather(test_tensor_list, test_tensor, group=group, async_op=False)
             dist.barrier()

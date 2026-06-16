@@ -1,6 +1,7 @@
 """Ring attention implementation using flash attention adapted from https://github.com/zhuzilin/ring-flash-attention/"""
 import torch
 import torch.distributed as dist
+from nanotron.npu_compat import device_ctx
 from flash_attn.flash_attn_interface import (
     _flash_attn_varlen_backward,
     _flash_attn_varlen_forward,
@@ -344,7 +345,7 @@ def flatten_varlen_lse(lse, cu_seqlens):
 
     BLOCK_M = 4
 
-    with torch.cuda.device(lse.device.index):
+    with device_ctx(lse.device.index):
         flatten_kernel[grid](
             output,
             lse,
@@ -416,7 +417,7 @@ def unflatten_varlen_lse(lse, cu_seqlens, max_seqlen: int):
 
     BLOCK_M = 4
 
-    with torch.cuda.device(lse.device.index):
+    with device_ctx(lse.device.index):
         unflatten_kernel[grid](
             output,
             lse,

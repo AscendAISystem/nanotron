@@ -7,7 +7,7 @@ from math import ceil
 import torch
 from einops import rearrange, reduce, repeat
 from torch import Tensor
-from torch.amp import autocast
+from nanotron.npu_compat import autocast
 from torch.autograd.function import Function
 
 # helpers
@@ -363,7 +363,7 @@ class RingFlashAttentionCUDAFunction(Function):
 ring_flash_attn_cuda_ = RingFlashAttentionCUDAFunction.apply
 
 
-@autocast("cuda", enabled=False)
+@autocast(enabled=False)
 def ring_flash_attn_cuda(
     module: torch.nn.Module,
     q: Tensor,

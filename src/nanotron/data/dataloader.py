@@ -13,6 +13,7 @@ from nanotron.data.samplers import EmptyInfiniteDataset, get_sampler
 from nanotron.logging.timers import nanotron_timer
 from nanotron.parallel import ParallelContext
 from nanotron.parallel.pipeline_parallel.tensor_pointer import TensorPointer
+from nanotron.npu_compat import get_default_device, synchronize, empty_cache, device_mod
 from nanotron.random import set_random_seed
 from nanotron.sanity_checks import (
     assert_fail_except_rank_with,
@@ -55,7 +56,7 @@ def sanity_check_dataloader(
             micro_batch = {
                 k: v
                 if isinstance(v, TensorPointer)
-                else v.to("cuda", memory_format=torch.contiguous_format, non_blocking=True)
+                else v.to(get_default_device(), memory_format=torch.contiguous_format, non_blocking=True)
                 for k, v in batch.items()
             }
 
@@ -131,7 +132,7 @@ def dummy_infinite_data_generator(
 
     def data_generator() -> Iterator[Dict[str, Union[torch.Tensor, TensorPointer]]]:
         # Random generator
-        generator = torch.Generator(device="cuda")
+        generator = torch.Generator(device=get_default_device())
         # Make sure that TP are synced always
         generator.manual_seed(
             seed * (1 + dist.get_rank(parallel_context.dp_pg)) * (1 + dist.get_rank(parallel_context.pp_pg))
@@ -140,13 +141,13 @@ def dummy_infinite_data_generator(
         if use_position_ids:
             document_lengths = [[4, 6, sequence_length - 10]] + [[sequence_length]] * (micro_batch_size - 1)
             position_ids = torch.full(
-                (micro_batch_size, sequence_length), fill_value=-1, dtype=torch.long, device="cuda"
+                (micro_batch_size, sequence_length), fill_value=-1, dtype=torch.long, device=get_default_device()
             )
             for i in range(micro_batch_size):
                 prev_idx = 0
                 for doc_idx, doc_len in enumerate(document_lengths[i]):
                     position_ids[i, prev_idx : prev_idx + doc_len] = torch.arange(
-                        0, doc_len, dtype=torch.long, device="cuda"
+                        0, doc_len, dtype=torch.long, device=get_default_device()
                     )
                     prev_idx += doc_len
             while True:
@@ -156,7 +157,7 @@ def dummy_infinite_data_generator(
                         vocab_size,
                         (micro_batch_size, sequence_length),
                         dtype=torch.long,
-                        device="cuda",
+                        device=get_default_device(),
                         generator=generator,
                     )[:, local_slice]
                     if dist.get_rank(parallel_context.pp_pg) == input_pp_rank
@@ -169,7 +170,7 @@ def dummy_infinite_data_generator(
                         vocab_size,
                         (micro_batch_size, sequence_length),
                         dtype=torch.long,
-                        device="cuda",
+                        device=get_default_device(),
                         generator=generator,
                     )[:, local_slice]
                     if dist.get_rank(parallel_context.pp_pg) == output_pp_rank
@@ -178,7 +179,7 @@ def dummy_infinite_data_generator(
                         micro_batch_size,
                         sequence_length,
                         dtype=torch.bool,
-                        device="cuda",
+                        device=get_default_device(),
                     )[:, local_slice]
                     if dist.get_rank(parallel_context.pp_pg) == output_pp_rank
                     else TensorPointer(group_rank=output_pp_rank),
@@ -191,7 +192,7 @@ def dummy_infinite_data_generator(
                         vocab_size,
                         (micro_batch_size, sequence_length),
                         dtype=torch.long,
-                        device="cuda",
+                        device=get_default_device(),
                         generator=generator,
                     )[:, local_slice]
                     if dist.get_rank(parallel_context.pp_pg) == input_pp_rank
@@ -200,7 +201,7 @@ def dummy_infinite_data_generator(
                         micro_batch_size,
                         sequence_length,
                         dtype=torch.bool,
-                        device="cuda",
+                        device=get_default_device(),
                     )[:, local_slice]
                     if dist.get_rank(parallel_context.pp_pg) == input_pp_rank
                     else TensorPointer(group_rank=input_pp_rank),
@@ -209,7 +210,7 @@ def dummy_infinite_data_generator(
                         vocab_size,
                         (micro_batch_size, sequence_length),
                         dtype=torch.long,
-                        device="cuda",
+                        device=get_default_device(),
                         generator=generator,
                     )[:, local_slice]
                     if dist.get_rank(parallel_context.pp_pg) == output_pp_rank
@@ -218,7 +219,7 @@ def dummy_infinite_data_generator(
                         micro_batch_size,
                         sequence_length,
                         dtype=torch.bool,
-                        device="cuda",
+                        device=get_default_device(),
                     )[:, local_slice]
                     if dist.get_rank(parallel_context.pp_pg) == output_pp_rank
                     else TensorPointer(group_rank=output_pp_rank),

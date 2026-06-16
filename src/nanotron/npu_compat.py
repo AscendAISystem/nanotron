@@ -146,7 +146,7 @@ def manual_seed(seed: int):
 def get_rng_state(device_id: Optional[int] = None) -> torch.Tensor:
     mod = device_mod()
     if mod is not None:
-        mod.get_rng_state(device_id) if device_id is not None else mod.get_rng_state()
+        return mod.get_rng_state(device_id) if device_id is not None else mod.get_rng_state()
     return torch.get_rng_state()
 
 
@@ -159,6 +159,16 @@ def set_rng_state(state: torch.Tensor, device_id: Optional[int] = None):
             mod.set_rng_state(state)
     else:
         torch.set_rng_state(state)
+
+
+@contextlib.contextmanager
+def device_ctx(device_id: int) -> Iterator[None]:
+    mod = device_mod()
+    if mod is not None and hasattr(mod, "device"):
+        with mod.device(device_id):
+            yield
+    else:
+        yield
 
 
 @contextlib.contextmanager
@@ -210,6 +220,7 @@ class Event:
 
 
 __all__ = [
+    "device_ctx",
     "is_npu_available",
     "is_cuda_available",
     "get_device_type",

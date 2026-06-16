@@ -7,6 +7,8 @@ import torch
 from torch.nn.attention.flex_attention import create_block_mask
 import functools
 
+from nanotron.npu_compat import get_default_device
+
 
 def create_softcapped_causal_score_mod(
     softcap: Optional[float],
@@ -134,7 +136,7 @@ def create_attention_mask(
 
 
 @functools.lru_cache(maxsize=32)
-def create_block_mask_cached(mask_func, B, H, Q_LEN, KV_LEN, device="cuda"):
+def create_block_mask_cached(mask_func, B, H, Q_LEN, KV_LEN, device=get_default_device()):
     """Cached version of create_block_mask for better performance."""
     block_mask = create_block_mask(mask_func, B, H, Q_LEN, KV_LEN, device=device)
     return block_mask

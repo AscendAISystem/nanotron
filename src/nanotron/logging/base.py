@@ -35,6 +35,7 @@ import torch
 from torch import distributed as torch_dist
 
 from nanotron import distributed as dist
+from nanotron.npu_compat import memory_allocated, max_memory_allocated, max_memory_reserved, reset_peak_memory_stats
 
 if TYPE_CHECKING:
     from nanotron.config import LoggingArgs
@@ -282,14 +283,14 @@ def human_format(num: float, billions: bool = False, divide_by_1024: bool = Fals
 def log_memory(logger: logging.Logger, msg: str = ""):
     log_rank(
         f"{msg}\n"
-        f" Memory usage: {torch.cuda.memory_allocated() / 1024**2:.2f}MiB."
-        f" Peak allocated {torch.cuda.max_memory_allocated() / 1024**2:.2f}MiB."
-        f" Peak reserved: {torch.cuda.max_memory_reserved() / 1024**2:.2f}MiB",
+        f" Memory usage: {memory_allocated() / 1024**2:.2f}MiB."
+        f" Peak allocated {max_memory_allocated() / 1024**2:.2f}MiB."
+        f" Peak reserved: {max_memory_reserved() / 1024**2:.2f}MiB",
         logger=logger,
         level=logging.INFO,
         rank=0,
     )
-    torch.cuda.reset_peak_memory_stats()
+    reset_peak_memory_stats()
 
 
 @dataclass
@@ -417,7 +418,10 @@ def set_ranks_logging_level(parallel_context: ParallelContext, logging_config: "
 
 def log_libraries_versions(logger: logging.Logger):
     import datasets
-    import flash_attn
+    try:
+        import flash_attn
+    except ImportError:
+        pass
     import numpy
     import torch
     import transformers

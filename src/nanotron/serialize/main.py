@@ -16,6 +16,7 @@ from nanotron.logging import log_rank
 from nanotron.parallel import ParallelContext
 from nanotron.parallel.parameters import NanotronParameter
 from nanotron.s3_checkpoints import S3Mover, check_path_is_local, fs_open
+from nanotron.npu_compat import get_default_device
 from nanotron.sanity_checks import (
     assert_tensor_synced_across_pg,
     check_optim_state_in_sync,
@@ -181,7 +182,7 @@ def save(
 
             for name, tensor in optim_state.items():
                 # FIXME @thomasw21: Some data is actually on `cpu`, just for this test we most it to `cuda`
-                tensor = tensor.to("cuda")
+                tensor = tensor.to(get_default_device())
 
                 if current_rank == reference_rank:
                     reference_tensor = tensor

@@ -7,6 +7,7 @@ from typing import Callable, Dict, Iterator, Optional, Tuple
 import torch
 from torch.distributed import GradBucket
 
+from nanotron.npu_compat import get_default_device, synchronize, empty_cache, device_mod
 import nanotron.distributed as dist
 from nanotron import logging
 from nanotron.parallel.parameters import NanotronParameter
@@ -92,7 +93,7 @@ class FP32GradientAccumulator(GradientAccumulator):
             segment_index[name] = (start, end_weight, param)
             length = end_weight
 
-        big_flat_buffer = torch.empty(length, dtype=torch.float, device="cuda")
+        big_flat_buffer = torch.empty(length, dtype=torch.float, device=get_default_device())
         self.parameters = {
             name: {
                 "fp32": big_flat_buffer[start_weight:end_weight].view_as(param),
@@ -171,7 +172,7 @@ class FP32GradientAccumulator(GradientAccumulator):
 
         needed_buffer_size = sum(param.numel() for _, param in named_parameters)
         # important to have grads zeroed initially (see `self._accumulate_grad`)
-        contiguous_buffer_f32_gradients = torch.zeros(needed_buffer_size, dtype=torch.float, device="cuda")
+        contiguous_buffer_f32_gradients = torch.zeros(needed_buffer_size, dtype=torch.float, device=get_default_device())
         untyped_storage = get_untyped_storage(contiguous_buffer_f32_gradients)
         element_size = contiguous_buffer_f32_gradients.element_size()
 

@@ -11,6 +11,7 @@ from nanotron import distributed as dist
 from nanotron import logging
 from nanotron.distributed import ProcessGroup
 from nanotron.logging import log_rank
+from nanotron.npu_compat import get_default_device
 from nanotron.parallel.context import ParallelContext
 from nanotron.parallel.pipeline_parallel.block import PipelineBlock
 from nanotron.logging import LoggingCollectorMixin
@@ -189,7 +190,7 @@ def build_model(
     parallel_context: ParallelContext,
     dtype: torch.dtype,
     target_pp_ranks: Optional[List[int]] = None,
-    device: Optional[torch.device] = torch.device("cuda"),
+    device: Optional[torch.device] = get_default_device(),
 ) -> NanotronModel:
     """Build the model and set the pp ranks for each pipeline block."""
     # TODO: classes dont take same args

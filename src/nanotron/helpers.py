@@ -45,6 +45,7 @@ from nanotron.random import (
 from nanotron.scaling.parametrization import LearningRateForSP, LearningRateForSpectralMup, ParametrizationMethod
 from nanotron.serialize import DataStageMetadata
 from nanotron.serialize.metadata import TrainingMetadata
+from nanotron.npu_compat import device_mod, empty_cache, synchronize, memory_allocated, max_memory_allocated, max_memory_reserved, device_count, get_default_device
 
 logger = logging.get_logger(__name__)
 
@@ -589,19 +590,19 @@ def test_all_pair_to_pair(
             if only_node_to_node and (a % 8 != 0 or b % 8 != 0):
                 # We only check node-to-node throughput
                 continue
-            test_tensor = torch.zeros((int(throughput_size),), dtype=torch.uint8, device=torch.device("cuda"))
+            test_tensor = torch.zeros((int(throughput_size),), dtype=torch.uint8, device=get_default_device())
             for k in range(throughput_iters):
                 pre = time.perf_counter()
-                torch.cuda.synchronize()
+                synchronize()
                 if wr == a:
                     dist.send(test_tensor, b, group=parallel_context.world_pg, tag=i + k)
                 elif wr == b:
                     dist.recv(test_tensor, a, group=parallel_context.world_pg, tag=i + k)
-                torch.cuda.synchronize()
+                synchronize()
                 duration = time.perf_counter() - pre
             del test_tensor
             gc.collect()
-            torch.cuda.empty_cache()
+            empty_cache()
             tput = (float(throughput_size) / duration) * 8  # *8 for gigabits/second
             log_rank(
                 f"[TEST] {j, i, wr} Results throughput from {a} to {b}: {tput/1e9:.4f} Gbps",
@@ -632,7 +633,7 @@ def create_table_log(
     return [
         LogItem("job_id", slurm_job_id, "s"),
         LogItem("name", config.general.run, "s"),
-        LogItem("nodes", math.ceil(parallel_context.world_pg.size() / torch.cuda.device_count()), "d"),
+        LogItem("nodes", math.ceil(parallel_context.world_pg.size() / device_count()), "d"),
         LogItem("seq_len", config.tokens.sequence_length, "d"),
         LogItem("mbs", config.tokens.micro_batch_size, "d"),
         LogItem("batch_accum", config.tokens.batch_accumulation_per_replica, "d"),
@@ -640,8 +641,8 @@ def create_table_log(
         LogItem("mTFLOPs", model_tflops, ".2f"),
         LogItem("hTFLOPs", hardware_tflops, ".2f"),
         LogItem("tok/s/gpu", tokens_per_sec / parallel_context.world_pg.size(), ".2f"),
-        LogItem("Mem Alloc (GB)", torch.cuda.max_memory_allocated() / 1024**3, ".2f"),
-        LogItem("Mem Res (GB)", torch.cuda.max_memory_reserved() / 1024**3, ".2f"),
+        LogItem("Mem Alloc (GB)", max_memory_allocated() / 1024**3, ".2f"),
+        LogItem("Mem Res (GB)", max_memory_reserved() / 1024**3, ".2f"),
         # Important config columns
         LogItem("dp", config.parallelism.dp, "d"),
         LogItem("pp", config.parallelism.pp, "d"),

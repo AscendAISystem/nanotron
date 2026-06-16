@@ -54,6 +54,7 @@ from nanotron.parallel.tensor_parallel.nn import (
     TensorParallelRowLinear,
 )
 from nanotron.parallel.tied_parameters import tie_parameters
+from nanotron.npu_compat import get_default_device
 from nanotron.random import RandomStates, branch_random_state
 from nanotron.utils import checkpoint_method
 
@@ -117,14 +118,14 @@ class StarcoderRotaryEmbedding(nn.Module):
             # Buffer if already initialized
             return
 
-        assert self.inv_freq.device.type == "cuda"
+        assert self.inv_freq.device.type == get_default_device().type
         # TODO @nouamane: One we figure out how to do the DTypeInvariantTensor, this can be removed and changed to an assert
         if self.inv_freq.dtype != torch.float:
             self.inv_freq = self.inv_freq.to(torch.float)
         assert self.inv_freq.dtype == torch.float
 
         self.inv_freq = 1.0 / (
-            self.base ** (torch.arange(0, self.head_dim, 2, dtype=torch.float, device="cuda") / self.head_dim)
+            self.base ** (torch.arange(0, self.head_dim, 2, dtype=torch.float, device=get_default_device()) / self.head_dim)
         )
 
         self._initialized_buffer = True
@@ -1267,7 +1268,7 @@ class GPTModel(nn.Module):
         super().__init__()
 
         # Declare all the nodes
-        self.p2p = P2P(parallel_context.pp_pg, device=torch.device("cuda"))
+        self.p2p = P2P(parallel_context.pp_pg, device=get_default_device())
         self.random_states = random_states
         self.tp_mode = parallel_config.tp_mode if parallel_config is not None else TensorParallelLinearMode.ALL_REDUCE
 

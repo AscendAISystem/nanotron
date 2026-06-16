@@ -8,6 +8,7 @@ import torch
 
 from nanotron import distributed as dist
 from nanotron import logging
+from nanotron.npu_compat import device_mod, is_npu_available, is_cuda_available, Event as NpuEvent
 
 logger = logging.get_logger(__name__)
 
@@ -41,8 +42,8 @@ class TimerRecord:
     _cpu_total_time: float = 0.0
 
     # CUDA specific fields
-    _cuda_events: List[tuple[torch.cuda.Event, torch.cuda.Event]] = field(default_factory=list)
-    _current_start_event: Optional[torch.cuda.Event] = None
+    _cuda_events: List[tuple[NpuEvent, NpuEvent]] = field(default_factory=list)
+    _current_start_event: Optional[NpuEvent] = None
 
     def __enter__(self):
         """Context manager support: Start the timer when entering a context."""
@@ -63,12 +64,12 @@ class TimerRecord:
             logger.warning(f"Timer '{self.name}' already running. Restarting.")
 
         if self.timer_type == TimerType.CUDA:
-            if torch.cuda.is_available():
+            if is_cuda_available():
                 # Synchronize before starting timing if requested
                 if self.cuda_sync:
-                    torch.cuda.synchronize()
+                    device_mod().synchronize()
                 # Create a new start event - we'll create the end event when end() is called
-                self._current_start_event = torch.cuda.Event(enable_timing=True)
+                self._current_start_event = NpuEvent(enable_timing=True)
                 self._current_start_event.record()
             else:
                 logger.warning("CUDA timer requested but CUDA is not available. Falling back to CPU timer.")
@@ -91,12 +92,12 @@ class TimerRecord:
             return
 
         if self.timer_type == TimerType.CUDA:
-            if torch.cuda.is_available() and self._current_start_event is not None:
+            if is_cuda_available() and self._current_start_event is not None:
                 # Synchronize before ending timing if requested
                 if self.cuda_sync:
-                    torch.cuda.synchronize()
+                    device_mod().synchronize()
                 # Create and record an end event
-                end_event = torch.cuda.Event(enable_timing=True)
+                end_event = NpuEvent(enable_timing=True)
                 end_event.record()
 
                 # Store the start/end event pair for later querying
@@ -142,11 +143,11 @@ class TimerRecord:
 
         # Timer is still running
         if self.timer_type == TimerType.CUDA:
-            if torch.cuda.is_available() and self._current_start_event is not None:
+            if is_cuda_available() and self._current_start_event is not None:
                 # Create a temporary end event to measure elapsed time so far
                 if self.cuda_sync:
-                    torch.cuda.synchronize()
-                tmp_end_event = torch.cuda.Event(enable_timing=True)
+                    device_mod().synchronize()
+                tmp_end_event = NpuEvent(enable_timing=True)
                 tmp_end_event.record()
                 tmp_end_event.synchronize()
                 return self._current_start_event.elapsed_time(tmp_end_event) / 1000.0
@@ -239,7 +240,7 @@ class Timers:
             name: Name of the timer
             timer_type: Type of timer, either TimerType.CUDA (default) or TimerType.CPU
                         (or 'cuda'/'cpu' strings)
-            cuda_sync: Whether to perform torch.cuda.synchronize() for more accurate CUDA timing.
+            cuda_sync: Whether to perform device_mod().synchronize() for more accurate CUDA timing.
                        Default is False to avoid unnecessary synchronization overhead.
             enabled: Override default enabled setting from environment variable
 
