@@ -87,9 +87,42 @@ def device_count() -> int:
     return 0
 
 
+_NPU_DEVICE_MAP: Optional[dict] = None
+
+
+def _build_npu_device_map() -> dict:
+    """Build a mapping of local_rank -> physical device, skipping broken devices."""
+    global _NPU_DEVICE_MAP
+    if _NPU_DEVICE_MAP is not None:
+        return _NPU_DEVICE_MAP
+    mod = device_mod()
+    total = mod.device_count() if mod is not None else 0
+    physical = []
+    for i in range(total):
+        try:
+            mod.set_device(i)
+            physical.append(i)
+        except Exception:
+            pass
+    _NPU_DEVICE_MAP = {idx: phys for idx, phys in enumerate(physical)}
+    return _NPU_DEVICE_MAP
+
+
 def set_device(device_id: int):
     mod = device_mod()
     if mod is not None:
+        dev_type = get_device_type()
+        if dev_type == "npu":
+            mapping = _build_npu_device_map()
+            phys = mapping.get(device_id)
+            if phys is None:
+                raise RuntimeError(
+                    f"No physical NPU device available for logical index {device_id}. "
+                    f"Available mappings: {mapping}"
+                )
+            if phys != device_id:
+                mod.set_device(phys)
+                return
         mod.set_device(device_id)
     else:
         warnings.warn("No accelerator device available to set_device.")

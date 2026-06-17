@@ -37,7 +37,9 @@ class DataStageMetadata:
 
     @property
     def consumed_tokens_all_datasets(self):
-        return sum(self.consumed_tokens_per_dataset_folder.values())
+        if self.consumed_tokens_per_dataset_folder:
+            return sum(self.consumed_tokens_per_dataset_folder.values())
+        return self.consumed_train_samples * self.sequence_length
 
 @dataclasses.dataclass
 class TrainingMetadata:
