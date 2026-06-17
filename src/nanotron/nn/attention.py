@@ -4,7 +4,12 @@ from typing import Literal, Optional, Tuple
 import torch
 from packaging import version
 
-from nanotron.nn.npu_attention import npu_flash_attn_func
+# Dispatch: CUDA uses flash_attn, NPU uses npu_attention
+if torch.npu.is_available():
+    from nanotron.nn.npu_attention import npu_flash_attn_func as flash_attn_func
+else:
+    from flash_attn import flash_attn_func
+
 from nanotron.nn.ring_attention import ring_flash_attn_varlen_func
 from nanotron.nn.llama3_ring_attention import llama3_flash_attn_varlen_qkvpacked_func
 
@@ -152,7 +157,7 @@ def flash_attention_forward(
     else:
         window_size = (-1, -1)
 
-    attn_output = npu_flash_attn_func(
+    attn_output = flash_attn_func(
         q=query,
         k=key,
         v=value,

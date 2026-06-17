@@ -57,7 +57,7 @@ class RingFlashAttentionCUDAFunction(Function):
         assert divisible_by(q_heads, kv_heads)
         q_head_groups = q_heads // kv_heads
 
-        assert all(t.is_cuda for t in (q, k, v)), "inputs must be all on cuda"
+        assert all(t.device.type in ("cuda", "npu") for t in (q, k, v)), "inputs must be all on cuda or npu"
 
         dtype = q.dtype
         softmax_scale = q.shape[-1] ** -0.5
@@ -1014,7 +1014,7 @@ def flash_attn_forward(
     assert d <= 128, "FlashAttention only support head dimensions up to 128"
     assert q.dtype == k.dtype == v.dtype, "All tensors must have the same type"
     assert q.dtype in [torch.float16, torch.bfloat16], "Only support fp16 and bf16"
-    assert q.is_cuda and k.is_cuda and v.is_cuda
+    assert q.device.type in ("cuda", "npu") and k.device.type in ("cuda", "npu") and v.device.type in ("cuda", "npu")
 
     softmax_scale = default(softmax_scale, d**-0.5)
 
@@ -1022,7 +1022,7 @@ def flash_attn_forward(
 
     if has_bias:
         assert bias.dtype in [q.dtype, torch.float]
-        assert bias.is_cuda
+        assert bias.device.type in ("cuda", "npu")
 
         if bias.ndim == 2:
             bias = repeat(bias, "b j -> b h i j", h=nheads, i=seqlen_q)
@@ -1723,7 +1723,7 @@ def flash_attn_backward(
     bias_type = "none"
     if has_bias:
         assert bias.dtype in [q.dtype, torch.float]
-        assert bias.is_cuda
+        assert bias.device.type in ("cuda", "npu")
         assert bias.dim() == 4
         assert bias.stride(-1) == 1
         if bias.shape[2:] == (1, seqlen_k):
