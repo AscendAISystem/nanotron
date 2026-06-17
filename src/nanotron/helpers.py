@@ -359,9 +359,7 @@ def init_optimizer_and_grad_accumulator(
 
             def optimizer(param_groups):
                 if is_npu_available():
-                    import torch_npu
-
-                    return torch_npu.optim.NpuFusedAdamW(
+                    return torch.optim.AdamW(
                         param_groups,
                         lr=optimizer_args.learning_rate_scheduler.learning_rate,
                         weight_decay=optimizer_args.weight_decay,
@@ -370,6 +368,7 @@ def init_optimizer_and_grad_accumulator(
                             optimizer_args.optimizer_factory.adam_beta1,
                             optimizer_args.optimizer_factory.adam_beta2,
                         ),
+                        fused=False,
                     )
                 return torch.optim.AdamW(
                     param_groups,

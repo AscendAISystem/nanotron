@@ -19,9 +19,7 @@ logger = logging.get_logger(__name__)
 try:
     import grouped_gemm.ops as ops
 except ImportError:
-    raise RuntimeError(
-        "Grouped GEMM is not available. Please run `pip install --no-build-isolation git+https://github.com/fanshiqing/grouped_gemm@main` (takes less than 5 minutes)"
-    )
+    ops = None
 
 
 class Router(nn.Module):

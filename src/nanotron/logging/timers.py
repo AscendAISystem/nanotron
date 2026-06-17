@@ -10,6 +10,10 @@ from nanotron import distributed as dist
 from nanotron import logging
 from nanotron.npu_compat import device_mod, is_npu_available, is_cuda_available, Event as NpuEvent
 
+def _is_device_available() -> bool:
+    """Check if any device (CUDA or NPU) with event support is available."""
+    return is_cuda_available() or is_npu_available()
+
 logger = logging.get_logger(__name__)
 
 
@@ -64,7 +68,7 @@ class TimerRecord:
             logger.warning(f"Timer '{self.name}' already running. Restarting.")
 
         if self.timer_type == TimerType.CUDA:
-            if is_cuda_available():
+            if _is_device_available():
                 # Synchronize before starting timing if requested
                 if self.cuda_sync:
                     device_mod().synchronize()
@@ -72,7 +76,7 @@ class TimerRecord:
                 self._current_start_event = NpuEvent(enable_timing=True)
                 self._current_start_event.record()
             else:
-                logger.warning("CUDA timer requested but CUDA is not available. Falling back to CPU timer.")
+                logger.warning("CUDA timer requested but no accelerator is available. Falling back to CPU timer.")
                 self.timer_type = TimerType.CPU
                 self.start_time = time.time()
         else:
@@ -92,7 +96,7 @@ class TimerRecord:
             return
 
         if self.timer_type == TimerType.CUDA:
-            if is_cuda_available() and self._current_start_event is not None:
+            if _is_device_available() and self._current_start_event is not None:
                 # Synchronize before ending timing if requested
                 if self.cuda_sync:
                     device_mod().synchronize()
@@ -104,7 +108,7 @@ class TimerRecord:
                 self._cuda_events.append((self._current_start_event, end_event))
                 self._current_start_event = None
             else:
-                logger.warning("CUDA timer end called but CUDA events are not available.")
+                logger.warning("CUDA timer end called but no accelerator is available.")
                 self.timer_type = TimerType.CPU
                 self.end_time = time.time()
                 self._cpu_total_time += self.end_time - self.start_time
@@ -143,7 +147,7 @@ class TimerRecord:
 
         # Timer is still running
         if self.timer_type == TimerType.CUDA:
-            if is_cuda_available() and self._current_start_event is not None:
+            if _is_device_available() and self._current_start_event is not None:
                 # Create a temporary end event to measure elapsed time so far
                 if self.cuda_sync:
                     device_mod().synchronize()

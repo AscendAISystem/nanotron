@@ -63,19 +63,21 @@ class RotaryEmbedding(nn.Module):
         dtype = x.dtype
 
         assert inner_dim % 2 == 0
-        x = x.view(batch_size, seq_length, num_heads, inner_dim // 2, 2)
+        orig_dtype = x.dtype
+        x = x.to(torch.float32).view(batch_size, seq_length, num_heads, inner_dim // 2, 2)
         complex_x = torch.view_as_complex(x)
 
         if position_ids is None:
             freqs_cis = self.freqs_cis[None, :seq_length, None, :]
         else:
             freqs_cis = self.freqs_cis[position_ids][:, :, None, :]
+        freqs_cis = freqs_cis.to(torch.float32)
 
         complex_freqs = torch.view_as_complex(freqs_cis)
         x_out = torch.view_as_real(complex_x * complex_freqs).view(
             batch_size, seq_length, num_heads, inner_dim
         )
-        return x_out.type(dtype)
+        return x_out.to(orig_dtype)
 
 
 __all__ = [
