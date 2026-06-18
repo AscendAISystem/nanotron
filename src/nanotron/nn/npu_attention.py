@@ -19,20 +19,19 @@ def _npu_flash_attention_prompt(
     num_key_value_heads: int = 0,
     input_layout: str = "BNSD",
 ) -> torch.Tensor:
-    kwargs = dict(
-        query=q.contiguous(),
-        key=k.contiguous(),
-        value=v.contiguous(),
-        num_heads=num_heads,
-        input_layout=input_layout,
-        scale_value=scale if scale is not None else 1.0 / math.sqrt(q.size(-1)),
-        num_key_value_heads=num_key_value_heads if num_key_value_heads > 0 else num_heads,
-    )
+    sparse_mode = 0
     if atten_mask is not None:
-        kwargs["atten_mask"] = atten_mask.contiguous()
-    if actual_seq_lengths is not None:
-        kwargs["actual_seq_lengths"] = actual_seq_lengths
-    return torch_npu.npu_prompt_flash_attention(**kwargs)
+        sparse_mode = 1
+    out, _, _, _, _, _, _ = torch_npu.npu_fusion_attention(
+        q.contiguous(), k.contiguous(), v.contiguous(),
+        head_num=num_heads,
+        input_layout=input_layout,
+        scale=scale if scale is not None else 1.0 / math.sqrt(q.size(-1)),
+        keep_prob=1.0,
+        atten_mask=atten_mask.contiguous() if atten_mask is not None else None,
+        sparse_mode=sparse_mode,
+    )
+    return out
 
 
 def _npu_flash_attention_incre(
@@ -163,40 +162,13 @@ def npu_flash_attn_varlen_func(
     alibi_slopes: Optional[torch.Tensor] = None,
     return_attn_probs: bool = False,
 ):
-    batch_size = cu_seqlens_q.shape[0] - 1
-    outputs = []
-
-    for i in range(batch_size):
-        q_start = cu_seqlens_q[i].item()
-        q_end = cu_seqlens_q[i + 1].item()
-        k_start = cu_seqlens_k[i].item()
-        k_end = cu_seqlens_k[i + 1].item()
-
-        q_i = q[q_start:q_end]
-        k_i = k[k_start:k_end]
-        v_i = v[k_start:k_end]
-
-        if q_i.numel() == 0 or k_i.numel() == 0:
-            continue
-
-        if q_i.dim() == 3:
-            q_i = q_i.unsqueeze(0).transpose(1, 2)
-            k_i = k_i.unsqueeze(0).transpose(1, 2)
-            v_i = v_i.unsqueeze(0).transpose(1, 2)
-
-        out_i = _run_with_fallback(
-            q_i, k_i, v_i,
-            scale=softmax_scale,
-            dropout_p=dropout_p,
-            is_causal=causal,
-        )
-
-        if out_i.dim() == 4:
-            out_i = out_i.transpose(1, 2).squeeze(0)
-        outputs.append(out_i)
-
-    result = torch.cat(outputs, dim=0) if outputs else torch.empty(0, q.shape[-1], device=q.device, dtype=q.dtype)
-    return (result, None) if return_attn_probs else result
+    out, _, _, _, _, _ = npu_fusion_attn_varlen_fwd(
+        q, k, v, cu_seqlens_q, cu_seqlens_k,
+        max_seqlen_q, max_seqlen_k,
+        dropout_p=dropout_p, softmax_scale=softmax_scale,
+        causal=causal, window_size=window_size,
+    )
+    return (out, None) if return_attn_probs else out
 
 
 def npu_flash_attn_with_kvcache(
