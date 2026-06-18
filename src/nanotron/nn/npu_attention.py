@@ -5,6 +5,7 @@ import torch
 import torch.nn.functional as F
 
 from nanotron.npu_compat import is_npu_available
+import torch_npu
 
 
 def _npu_flash_attention_prompt(
@@ -18,8 +19,6 @@ def _npu_flash_attention_prompt(
     num_key_value_heads: int = 0,
     input_layout: str = "BNSD",
 ) -> torch.Tensor:
-    import torch_npu
-
     kwargs = dict(
         query=q.contiguous(),
         key=k.contiguous(),
@@ -47,8 +46,6 @@ def _npu_flash_attention_incre(
     num_key_value_heads: int = 0,
     input_layout: str = "BSH",
 ) -> torch.Tensor:
-    import torch_npu
-
     kwargs = dict(
         query=q.contiguous(),
         key=k.contiguous(),
@@ -332,6 +329,180 @@ def pad_input(
     return output
 
 
+def npu_fusion_attn_varlen_fwd(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    dropout_p: float = 0.0,
+    softmax_scale: Optional[float] = None,
+    causal: bool = False,
+    window_size: Tuple[int, int] = (-1, -1),
+):
+    if softmax_scale is None:
+        softmax_scale = 1.0 / math.sqrt(q.size(-1))
+
+    actual_seq_qlen = cu_seqlens_q[1:].tolist()
+    actual_seq_kvlen = cu_seqlens_k[1:].tolist()
+
+    sparse_mode = 3 if causal else 0
+    pre_tockens = window_size[0] if window_size[0] > 0 else max_seqlen_q
+    next_tockens = window_size[1] if window_size[1] > 0 else max_seqlen_k
+
+    out, softmax_max, softmax_sum, _, seed, offset, numels = torch_npu.npu_fusion_attention(
+        q.contiguous(), k.contiguous(), v.contiguous(),
+        head_num=q.size(1),
+        input_layout="TND",
+        scale=softmax_scale,
+        keep_prob=1.0 - dropout_p,
+        pre_tockens=pre_tockens,
+        next_tockens=next_tockens,
+        actual_seq_qlen=actual_seq_qlen,
+        actual_seq_kvlen=actual_seq_kvlen,
+        sparse_mode=sparse_mode,
+    )
+    return out, softmax_max, softmax_sum, seed, offset, numels
+
+
+def npu_fusion_attn_varlen_bwd(
+    dout: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    out: torch.Tensor,
+    softmax_max: torch.Tensor,
+    softmax_sum: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    dropout_p: float = 0.0,
+    softmax_scale: Optional[float] = None,
+    causal: bool = False,
+    window_size: Tuple[int, int] = (-1, -1),
+    seed: int = 0,
+    offset: int = 0,
+    numels: int = 0,
+):
+    if softmax_scale is None:
+        softmax_scale = 1.0 / math.sqrt(q.size(-1))
+
+    actual_seq_qlen = cu_seqlens_q[1:].tolist()
+    actual_seq_kvlen = cu_seqlens_k[1:].tolist()
+
+    sparse_mode = 3 if causal else 0
+    pre_tockens = window_size[0] if window_size[0] > 0 else max_seqlen_q
+    next_tockens = window_size[1] if window_size[1] > 0 else max_seqlen_k
+
+    dq, dk, dv, _, _ = torch_npu.npu_fusion_attention_grad(
+        q.contiguous(), k.contiguous(), v.contiguous(), dout.contiguous(),
+        head_num=q.size(1),
+        input_layout="TND",
+        softmax_max=softmax_max,
+        softmax_sum=softmax_sum,
+        attention_in=out.contiguous(),
+        scale_value=softmax_scale,
+        keep_prob=1.0 - dropout_p,
+        pre_tockens=pre_tockens,
+        next_tockens=next_tockens,
+        seed=seed,
+        offset=offset,
+        numels=numels,
+        actual_seq_qlen=actual_seq_qlen,
+        actual_seq_kvlen=actual_seq_kvlen,
+        sparse_mode=sparse_mode,
+    )
+    return dq, dk, dv
+
+
+def npu_fusion_attn_fwd(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    dropout_p: float = 0.0,
+    softmax_scale: Optional[float] = None,
+    causal: bool = False,
+    window_size: Tuple[int, int] = (-1, -1),
+):
+    if softmax_scale is None:
+        softmax_scale = 1.0 / math.sqrt(q.size(-1))
+
+    sparse_mode = 0
+    pre_tockens = 2147483647
+    next_tockens = 2147483647
+
+    if causal and window_size == (-1, -1):
+        sparse_mode = 3
+    elif window_size != (-1, -1):
+        sparse_mode = 4
+        pre_tockens = window_size[0]
+        next_tockens = window_size[1]
+
+    out, softmax_max, softmax_sum, _, seed, offset, numels = torch_npu.npu_fusion_attention(
+        q.contiguous(), k.contiguous(), v.contiguous(),
+        head_num=q.size(1),
+        input_layout="BNSD" if q.dim() == 4 else "BSH",
+        scale=softmax_scale,
+        keep_prob=1.0 - dropout_p,
+        pre_tockens=pre_tockens,
+        next_tockens=next_tockens,
+        sparse_mode=sparse_mode,
+    )
+    return out, softmax_max, softmax_sum, seed, offset, numels
+
+
+def npu_fusion_attn_bwd(
+    dout: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    out: torch.Tensor,
+    softmax_max: torch.Tensor,
+    softmax_sum: torch.Tensor,
+    dropout_p: float = 0.0,
+    softmax_scale: Optional[float] = None,
+    causal: bool = False,
+    window_size: Tuple[int, int] = (-1, -1),
+    seed: int = 0,
+    offset: int = 0,
+    numels: int = 0,
+):
+    if softmax_scale is None:
+        softmax_scale = 1.0 / math.sqrt(q.size(-1))
+
+    sparse_mode = 0
+    pre_tockens = 2147483647
+    next_tockens = 2147483647
+
+    if causal and window_size == (-1, -1):
+        sparse_mode = 3
+    elif window_size != (-1, -1):
+        sparse_mode = 4
+        pre_tockens = window_size[0]
+        next_tockens = window_size[1]
+
+    dq, dk, dv, _, _ = torch_npu.npu_fusion_attention_grad(
+        q.contiguous(), k.contiguous(), v.contiguous(), dout.contiguous(),
+        head_num=q.size(1),
+        input_layout="BNSD" if q.dim() == 4 else "BSH",
+        softmax_max=softmax_max,
+        softmax_sum=softmax_sum,
+        attention_in=out.contiguous(),
+        scale_value=softmax_scale,
+        keep_prob=1.0 - dropout_p,
+        pre_tockens=pre_tockens,
+        next_tockens=next_tockens,
+        seed=seed,
+        offset=offset,
+        numels=numels,
+        sparse_mode=sparse_mode,
+    )
+    return dq, dk, dv
+
+
 __all__ = [
     "npu_flash_attention",
     "sdpa_attention",
@@ -341,4 +512,8 @@ __all__ = [
     "npu_flash_attn_func",
     "unpad_input",
     "pad_input",
+    "npu_fusion_attn_varlen_fwd",
+    "npu_fusion_attn_varlen_bwd",
+    "npu_fusion_attn_fwd",
+    "npu_fusion_attn_bwd",
 ]
