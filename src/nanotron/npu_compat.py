@@ -126,7 +126,6 @@ def _build_npu_device_map() -> dict:
             f"Use ASCEND_RT_VISIBLE_DEVICES to exclude broken devices."
         )
     return _NPU_DEVICE_MAP
-    return _NPU_DEVICE_MAP
 
 
 def set_device(device_id: int):
