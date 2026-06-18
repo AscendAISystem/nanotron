@@ -118,21 +118,43 @@ def ring_flash_attn_varlen_forward(
                     old_lse = True
                     block_lse = flatten_varlen_lse(block_lse, cu_seqlens=cu_seqlens)
             else:
+                # Compute K sub-cu_seqlens for this step
+                if torch.npu.is_available():
+                    kv_rank = (comm.rank - step) % comm.world_size
+                    kv_start = kv_rank * local_len
+                    kv_end = (kv_rank + 1) * local_len
+                    npu_kv_sub_cu, npu_kv_sub_max = _compute_sub_cu_seqlens(
+                        cu_seqlens, kv_start, kv_end
+                    )
+                else:
+                    npu_kv_sub_cu, npu_kv_sub_max = npu_q_sub_cu, npu_q_sub_max
+                # CANN requires same number of sequences in Q and K.
+                # Off-diagonal steps (step>0) are non-causal, so each Q token
+                # attends to all K tokens regardless of sequence boundaries.
+                # Flatten both to single sequences when they mismatch.
+                if len(npu_q_sub_cu) != len(npu_kv_sub_cu):
+                    q_total = npu_q_sub_cu[-1].clone()
+                    k_total = npu_kv_sub_cu[-1].clone()
+                    zero = npu_q_sub_cu.new_zeros(1, dtype=torch.int32)
+                    npu_q_sub_cu = torch.cat([zero, q_total.unsqueeze(0)])
+                    npu_kv_sub_cu = torch.cat([zero, k_total.unsqueeze(0)])
+                    npu_q_sub_max = npu_q_sub_cu[-1].item()
+                    npu_kv_sub_max = npu_kv_sub_cu[-1].item()
                 block_out, smax, ssum, seed, off, nels = npu_fusion_attn_varlen_fwd(
                     q=q,
                     k=k,
                     v=v,
                     cu_seqlens_q=npu_q_sub_cu,
-                    cu_seqlens_k=npu_q_sub_cu,
+                    cu_seqlens_k=npu_kv_sub_cu,
                     max_seqlen_q=npu_q_sub_max,
-                    max_seqlen_k=npu_q_sub_max,
+                    max_seqlen_k=npu_kv_sub_max,
                     dropout_p=dropout_p,
                     softmax_scale=softmax_scale,
                     causal=causal and step == 0,
                     window_size=window_size,
                 )
                 if npu_aux_stack is not None:
-                    npu_aux_stack.append((smax, ssum, block_out, seed, off, nels, npu_q_sub_cu, npu_q_sub_max))
+                    npu_aux_stack.append((smax, ssum, block_out, seed, off, nels, npu_kv_sub_cu, npu_kv_sub_max))
                 # CANN smax/ssum: [total_tokens, nheads, block_size]
                 # Reshape block_lse to [nheads, total_tokens] to match CUDA convention,
                 # so that update_out_and_lse's transpose(-2,-1).unsqueeze(-1) produces
@@ -271,12 +293,13 @@ def _ring_flash_attn_varlen_backward_npu(
     next_k, next_v = None, None
     aux_idx = 0
 
-    npu_sub_cu, npu_sub_max = None, 0
+    # Compute Q sub-cu (same as forward)
+    npu_q_sub_cu_bwd, npu_q_sub_max_bwd = None, 0
     if torch.npu.is_available():
         local_len = cu_seqlens[-1].item() // kv_comm.world_size
         q_start = kv_comm.rank * local_len
         q_end = (kv_comm.rank + 1) * local_len
-        npu_sub_cu, npu_sub_max = _compute_sub_cu_seqlens(
+        npu_q_sub_cu_bwd, npu_q_sub_max_bwd = _compute_sub_cu_seqlens(
             cu_seqlens, q_start, q_end
         )
 
@@ -285,16 +308,17 @@ def _ring_flash_attn_varlen_backward_npu(
             next_k, next_v = kv_comm.send_recv_kv(k, v)
 
         if step <= kv_comm.rank or not causal:
-            smax, ssum, block_out, seed, off, nels, _, _ = npu_aux_stack[aux_idx]
+            # Unpack aux: (smax, ssum, block_out, seed, off, nels, kv_sub_cu, kv_sub_max)
+            smax, ssum, block_out, seed, off, nels, npu_kv_sub_cu, npu_kv_sub_max = npu_aux_stack[aux_idx]
             aux_idx += 1
 
             bwd_causal = causal and step == 0
             dq_block, dk_block, dv_block = npu_fusion_attn_varlen_bwd(
                 dout, q, k, v, block_out, smax, ssum,
-                cu_seqlens_q=npu_sub_cu,
-                cu_seqlens_k=npu_sub_cu,
-                max_seqlen_q=npu_sub_max,
-                max_seqlen_k=npu_sub_max,
+                cu_seqlens_q=npu_q_sub_cu_bwd,
+                cu_seqlens_k=npu_kv_sub_cu,
+                max_seqlen_q=npu_q_sub_max_bwd,
+                max_seqlen_k=npu_kv_sub_max,
                 dropout_p=dropout_p,
                 softmax_scale=softmax_scale,
                 causal=bwd_causal,
