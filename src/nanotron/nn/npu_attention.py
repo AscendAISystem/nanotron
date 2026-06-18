@@ -5,7 +5,10 @@ import torch
 import torch.nn.functional as F
 
 from nanotron.npu_compat import is_npu_available
-import torch_npu
+if is_npu_available():
+    import torch_npu
+else:
+    torch_npu = None
 
 
 def _npu_flash_attention_prompt(

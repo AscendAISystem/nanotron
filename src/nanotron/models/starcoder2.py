@@ -54,13 +54,19 @@ from nanotron.parallel.tensor_parallel.nn import (
     TensorParallelRowLinear,
 )
 from nanotron.parallel.tied_parameters import tie_parameters
-from nanotron.npu_compat import get_default_device
-from nanotron.nn.npu_attention import (
-    npu_flash_attn_varlen_func,
-    npu_flash_attn_with_kvcache,
-    unpad_input,
-    pad_input,
-)
+from nanotron.npu_compat import get_default_device, is_npu_available
+if is_npu_available():
+    from nanotron.nn.npu_attention import (
+        npu_flash_attn_varlen_func,
+        npu_flash_attn_with_kvcache,
+        unpad_input,
+        pad_input,
+    )
+else:
+    npu_flash_attn_varlen_func = None
+    npu_flash_attn_with_kvcache = None
+    unpad_input = None
+    pad_input = None
 from nanotron.random import RandomStates, branch_random_state
 from nanotron.utils import checkpoint_method
 

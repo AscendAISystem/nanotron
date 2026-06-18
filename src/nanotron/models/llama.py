@@ -17,12 +17,19 @@
 from typing import Dict, List, Optional, Union
 
 import torch
-from nanotron.nn.npu_attention import (
-    npu_flash_attn_varlen_func,
-    npu_flash_attn_with_kvcache,
-    unpad_input,
-    pad_input,
-)
+from nanotron.npu_compat import is_npu_available
+if is_npu_available():
+    from nanotron.nn.npu_attention import (
+        npu_flash_attn_varlen_func,
+        npu_flash_attn_with_kvcache,
+        unpad_input,
+        pad_input,
+    )
+else:
+    npu_flash_attn_varlen_func = None
+    npu_flash_attn_with_kvcache = None
+    unpad_input = None
+    pad_input = None
 from torch import nn
 from torch.utils.checkpoint import CheckpointFunction
 

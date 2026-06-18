@@ -1,7 +1,11 @@
 from typing import Dict, List, Optional, Tuple, Union
 
 import torch
-from nanotron.nn.npu_attention import npu_flash_attn_varlen_kvpacked_func
+from nanotron.npu_compat import is_npu_available
+if is_npu_available():
+    from nanotron.nn.npu_attention import npu_flash_attn_varlen_kvpacked_func
+else:
+    npu_flash_attn_varlen_kvpacked_func = None
 from torch import nn
 from torch.utils.checkpoint import CheckpointFunction
 
