@@ -5,7 +5,7 @@ from nanotron.npu_compat import device_ctx
 
 # Dispatch: CUDA uses flash_attn_interface, NPU uses npu_attention wrapper
 if torch.npu.is_available():
-    from nanotron.nn.npu_attention import npu_flash_attn_varlen_func
+    from nanotron.nn.npu_attention import npu_flash_attn_varlen_func, npu_fusion_attn_varlen_fwd, npu_fusion_attn_varlen_bwd
     _flash_attn_varlen_forward = None
     _flash_attn_varlen_backward = None
 else:
@@ -13,6 +13,8 @@ else:
         _flash_attn_varlen_backward,
         _flash_attn_varlen_forward,
     )
+
+_npu_ring_aux_stack = []
 
 
 def ring_flash_attn_varlen_forward(
@@ -36,6 +38,8 @@ def ring_flash_attn_varlen_forward(
     next_k, next_v = None, None
 
     old_lse = False
+    if torch.npu.is_available():
+        _npu_ring_aux_stack.clear()
     for step in range(comm.world_size):
         if step + 1 != comm.world_size:
             next_k, next_v = comm.send_recv_kv(k, v)
@@ -77,7 +81,7 @@ def ring_flash_attn_varlen_forward(
                     old_lse = True
                     block_lse = flatten_varlen_lse(block_lse, cu_seqlens=cu_seqlens)
             else:
-                out_block = npu_flash_attn_varlen_func(
+                block_out, smax, ssum, seed, off, nels = npu_fusion_attn_varlen_fwd(
                     q=q,
                     k=k,
                     v=v,
@@ -89,11 +93,9 @@ def ring_flash_attn_varlen_forward(
                     softmax_scale=softmax_scale,
                     causal=causal and step == 0,
                     window_size=window_size,
-                    alibi_slopes=alibi_slopes,
-                    return_attn_probs=False,
                 )
-                block_out = out_block
-                block_lse = torch.zeros_like(out_block)
+                _npu_ring_aux_stack.append((smax, ssum, block_out, seed, off, nels))
+                block_lse = smax[..., 0:1] + torch.log(ssum[..., 0:1])
             out, lse = update_out_and_lse(out, lse, block_out, block_lse)
 
         if step + 1 != comm.world_size:
@@ -200,6 +202,77 @@ def _ring_flash_attn_varlen_backward_cuda(
     return dq.to(torch.bfloat16), next_dk.to(q.dtype), next_dv.to(q.dtype)
 
 
+def _ring_flash_attn_varlen_backward_npu(
+    process_group,
+    dout,
+    q,
+    k,
+    v,
+    out,
+    softmax_lse,
+    cu_seqlens,
+    max_seqlen,
+    softmax_scale,
+    dropout_p=0,
+    causal=True,
+    window_size=(-1, -1),
+    alibi_slopes=None,
+    deterministic=False,
+):
+    kv_comm = RingComm(process_group)
+    d_kv_comm = RingComm(process_group)
+    dq, dk, dv = None, None, None
+    next_dk, next_dv = None, None
+
+    next_dk, next_dv = None, None
+    next_k, next_v = None, None
+    for step in range(kv_comm.world_size):
+        if step + 1 != kv_comm.world_size:
+            next_k, next_v = kv_comm.send_recv_kv(k, v)
+
+        if step <= kv_comm.rank or not causal:
+            smax, ssum, block_out, seed, off, nels = _npu_ring_aux_stack.pop()
+
+            bwd_causal = causal and step == 0
+            dq_block, dk_block, dv_block = npu_fusion_attn_varlen_bwd(
+                dout, q, k, v, block_out, smax, ssum,
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_k=cu_seqlens,
+                max_seqlen_q=max_seqlen,
+                max_seqlen_k=max_seqlen,
+                dropout_p=dropout_p,
+                softmax_scale=softmax_scale,
+                causal=bwd_causal,
+                window_size=window_size,
+                seed=seed,
+                offset=off,
+                numels=nels,
+            )
+
+            if dq is None:
+                dq = dq_block.to(torch.float32)
+                dk = dk_block.to(torch.float32)
+                dv = dv_block.to(torch.float32)
+            else:
+                dq += dq_block
+                d_kv_comm.wait()
+                dk = dk_block + next_dk
+                dv = dv_block + next_dv
+        elif step != 0:
+            d_kv_comm.wait()
+            dk, dv = next_dk, next_dv
+
+        if step + 1 != kv_comm.world_size:
+            kv_comm.wait()
+            k, v = next_k, next_v
+
+        next_dk, next_dv = d_kv_comm.send_recv_kv(dk, dv)
+
+    d_kv_comm.wait()
+
+    return dq.to(torch.bfloat16), next_dk.to(q.dtype), next_dv.to(q.dtype)
+
+
 def ring_flash_attn_varlen_backward(
     process_group,
     dout,
@@ -223,9 +296,10 @@ def ring_flash_attn_varlen_backward(
             cu_seqlens, max_seqlen, softmax_scale, dropout_p,
             causal, window_size, alibi_slopes, deterministic,
         )
-    raise NotImplementedError(
-        "NPU ring attention backward is not yet supported. "
-        "Use a non-ring attention implementation instead."
+    return _ring_flash_attn_varlen_backward_npu(
+        process_group, dout, q, k, v, out, softmax_lse,
+        cu_seqlens, max_seqlen, softmax_scale, dropout_p,
+        causal, window_size, alibi_slopes, deterministic,
     )
 
 

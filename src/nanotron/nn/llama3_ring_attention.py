@@ -6,7 +6,11 @@ from nanotron.npu_compat import device_ctx
 
 # Dispatch: CUDA uses flash_attn_interface, NPU uses npu_attention wrapper
 if torch.npu.is_available():
-    from nanotron.nn.npu_attention import npu_flash_attn_varlen_func
+    from nanotron.nn.npu_attention import (
+        npu_flash_attn_varlen_func,
+        npu_fusion_attn_varlen_fwd,
+        npu_fusion_attn_varlen_bwd,
+    )
     _flash_attn_varlen_forward = None
     _flash_attn_varlen_backward = None
 else:
@@ -14,6 +18,8 @@ else:
         _flash_attn_varlen_backward,
         _flash_attn_varlen_forward,
     )
+
+_npu_llama3_aux_stack = []
 
 def llama3_flash_attn_prepare_cu_seqlens(
     cu_seqlens: torch.Tensor, causal: bool, rank: int, world_size: int
@@ -93,6 +99,7 @@ def llama3_flash_attn_varlen_forward(
     total_k, nheads_k, head_dim = k.shape
     assert nheads_k % heads_k_stride == 0, f"nheads_k={nheads_k} must be divisible by heads_k_stride={heads_k_stride}"
 
+    _npu_llama3_aux_stack.clear()
     world_size = dist.get_world_size(process_group)
     kv_buffer = torch.empty(
         (2, total_k * world_size, heads_k_stride, head_dim),
@@ -160,15 +167,15 @@ def llama3_flash_attn_varlen_forward(
                 assert len(outputs) == 4
                 out_block, lse, _, _ = outputs
         else:
-            out_block = npu_flash_attn_varlen_func(
+            out_block, smax, ssum, seed, off, nels = npu_fusion_attn_varlen_fwd(
                 q=q_i, k=k_i, v=v_i,
                 cu_seqlens_q=cu_seqlens_q, cu_seqlens_k=cu_seqlens_k,
                 max_seqlen_q=max_seqlen_q, max_seqlen_k=max_seqlen_k,
                 dropout_p=dropout_p, softmax_scale=softmax_scale,
                 causal=causal, window_size=window_size,
-                alibi_slopes=alibi_slopes, return_attn_probs=False,
             )
-            lse = torch.zeros_like(out_block)
+            _npu_llama3_aux_stack.append((smax, ssum, out_block, seed, off, nels))
+            lse = smax[..., 0:1] + torch.log(ssum[..., 0:1])
         out_list.append(out_block)
         lse_list.append(lse)
 
@@ -316,6 +323,120 @@ def _llama3_flash_attn_varlen_backward_cuda(
     return dq, dk, dv
 
 
+def _llama3_flash_attn_varlen_backward_npu(
+    process_group,
+    dout,
+    q,
+    k,
+    v,
+    out,
+    softmax_lse,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    max_seqlen_q,
+    max_seqlen_k,
+    heads_k_stride,
+    local_k_slice,
+    softmax_scale,
+    dropout_p=0,
+    causal=True,
+    window_size=(-1, -1),
+    alibi_slopes=None,
+    deterministic=False,
+):
+    nheads = q.shape[1]
+    total_k, nheads_k, head_dim = k.shape
+    assert nheads_k % heads_k_stride == 0
+
+    world_size = dist.get_world_size(process_group)
+    kv_buffer = torch.empty(
+        (2, total_k * world_size, heads_k_stride, head_dim),
+        dtype=k.dtype,
+        device=k.device,
+    )
+    kv_buffer_copy = torch.empty_like(kv_buffer)
+
+    dkv_buffer = torch.empty(
+        (2, total_k * world_size, heads_k_stride, head_dim),
+        dtype=k.dtype,
+        device=k.device,
+    )
+
+    if heads_k_stride != nheads_k:
+        kv_contiguous_buffer = torch.empty(
+            (2, total_k, heads_k_stride, head_dim),
+            dtype=k.dtype,
+            device=k.device,
+        )
+
+    dq = torch.empty_like(q)
+    dk = torch.empty_like(k)
+    dv = torch.empty_like(v)
+
+    comm = Comm(process_group)
+
+    k_0 = k[:, :heads_k_stride].contiguous()
+    v_0 = v[:, :heads_k_stride].contiguous()
+    comm.all_gather(kv_buffer_copy[0], k_0)
+    comm.all_gather(kv_buffer_copy[1], v_0)
+
+    for i in range(0, nheads_k, heads_k_stride):
+        dkv_buffer.zero_()
+
+        q_slice = slice(
+            i * nheads // nheads_k, (i + heads_k_stride) * nheads // nheads_k
+        )
+        q_i = q[:, q_slice]
+        dout_i = dout[:, q_slice]
+        out_i = out[:, q_slice]
+        dq_i = dq[:, q_slice]
+
+        comm.wait()
+        kv_buffer, kv_buffer_copy = kv_buffer_copy, kv_buffer
+
+        if i < nheads_k - heads_k_stride:
+            kv_slice_left = i + heads_k_stride
+            kv_slice_right = kv_slice_left + heads_k_stride
+            send_k = k[:, kv_slice_left:kv_slice_right].contiguous()
+            send_v = v[:, kv_slice_left:kv_slice_right].contiguous()
+            comm.all_gather(kv_buffer_copy[0], send_k)
+            comm.all_gather(kv_buffer_copy[1], send_v)
+
+        k_i = kv_buffer[0][local_k_slice]
+        v_i = kv_buffer[1][local_k_slice]
+        dk_i = dkv_buffer[0][local_k_slice]
+        dv_i = dkv_buffer[1][local_k_slice]
+
+        smax, ssum, out_block, seed, off, nels = _npu_llama3_aux_stack.pop(0)
+        dq_i_out, dk_i_out, dv_i_out = npu_fusion_attn_varlen_bwd(
+            dout=dout_i, q=q_i, k=k_i, v=v_i, out=out_i,
+            softmax_max=smax, softmax_sum=ssum,
+            cu_seqlens_q=cu_seqlens_q, cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=max_seqlen_q, max_seqlen_k=max_seqlen_k,
+            dropout_p=dropout_p, softmax_scale=softmax_scale,
+            causal=causal, window_size=window_size,
+            seed=seed, offset=off, numels=nels,
+        )
+        dq_i.copy_(dq_i_out)
+
+        if heads_k_stride != nheads_k:
+            dk_i = kv_contiguous_buffer[0]
+            dv_i = kv_contiguous_buffer[1]
+        else:
+            dk_i = dk
+            dv_i = dv
+
+        dist.reduce_scatter_tensor(dk_i, dkv_buffer[0], group=process_group)
+        dist.reduce_scatter_tensor(dv_i, dkv_buffer[1], group=process_group)
+
+        if heads_k_stride != nheads_k:
+            dk[:, i : i + heads_k_stride] = dk_i
+            dv[:, i : i + heads_k_stride] = dv_i
+
+    _npu_llama3_aux_stack.clear()
+    return dq, dk, dv
+
+
 def llama3_flash_attn_varlen_backward(
     process_group,
     dout,
@@ -344,9 +465,11 @@ def llama3_flash_attn_varlen_backward(
             heads_k_stride, local_k_slice, softmax_scale, dropout_p,
             causal, window_size, alibi_slopes, deterministic,
         )
-    raise NotImplementedError(
-        "NPU llama3 ring attention backward is not yet supported. "
-        "Use a non-ring attention implementation instead."
+    return _llama3_flash_attn_varlen_backward_npu(
+        process_group, dout, q, k, v, out, softmax_lse,
+        cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
+        heads_k_stride, local_k_slice, softmax_scale, dropout_p,
+        causal, window_size, alibi_slopes, deterministic,
     )
 
 
