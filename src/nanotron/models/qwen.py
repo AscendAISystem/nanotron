@@ -32,6 +32,7 @@ from nanotron.random import RandomStates
 from nanotron.scaling.parametrization import SpectralMupParametrizator, StandardParametrizator
 from nanotron.logging import LogMixin
 from nanotron.nn.llama3_ring_attention import llama3_flash_attn_varlen_kvpacked_func, llama3_flash_attn_prepare_cu_seqlens
+from nanotron.nn.ring_attention import ring_flash_attn_varlen_func
 logger = logging.get_logger(__name__)
 
 
@@ -305,6 +306,23 @@ class Qwen2Attention(LogMixin, nn.Module):
                 return_attn_probs=self.log_attn_probs,
                 group=self.cp_pg,
             )  # Not contiguous, similar to flash_attn
+        elif self.config._attn_implementation == "ring":
+            k, v = kv.unbind(2)
+            attn_output = ring_flash_attn_varlen_func(
+                None,
+                q.view(-1, self.local_num_heads, self.head_dim),
+                k.contiguous().view(-1, self.local_num_kv_heads, self.head_dim),
+                v.contiguous().view(-1, self.local_num_kv_heads, self.head_dim),
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
+                dropout=0.0,
+                scaling=None,
+                causal=True,
+                window_size=(self.sliding_window_size - 1, 0) if self.sliding_window_size is not None else (-1, -1),
+                deterministic=False,
+                return_attn_probs=self.log_attn_probs,
+                ring_pg=self.cp_pg,
+            )[0]
         else:
             assert cu_seqlens.dtype == torch.int32
             assert max_seqlen is not None

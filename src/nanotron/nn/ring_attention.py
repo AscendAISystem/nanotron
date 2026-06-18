@@ -17,6 +17,33 @@ else:
 _npu_ring_aux_stack = []
 
 
+def _compute_sub_cu_seqlens(cu_seqlens_global, chunk_start, chunk_end):
+    """Compute sub-block cumulative lengths for a given token chunk.
+    
+    Given the GLOBAL cu_seqlens and a [chunk_start, chunk_end) token range,
+    returns sub-block cu_seqlens covering only the non-zero-length sequences.
+    
+    Returns:
+        sub_cu: sub-block cu_seqlens (dtype int32, same device as input)
+        sub_max: max sequence length within the chunk (int)
+    """
+    seg_lens = []
+    for i in range(len(cu_seqlens_global) - 1):
+        gs = cu_seqlens_global[i].item()
+        ge = cu_seqlens_global[i + 1].item()
+        if gs >= chunk_end or ge <= chunk_start:
+            continue
+        seg_len = min(ge, chunk_end) - max(gs, chunk_start)
+        if seg_len > 0:
+            seg_lens.append(seg_len)
+    if not seg_lens:
+        return cu_seqlens_global.new_zeros(2, dtype=torch.int32), 0
+    sub_cu = cu_seqlens_global.new_zeros(len(seg_lens) + 1, dtype=torch.int32)
+    for i, l in enumerate(seg_lens):
+        sub_cu[i + 1] = sub_cu[i] + l
+    return sub_cu, max(seg_lens)
+
+
 def ring_flash_attn_varlen_forward(
     process_group,
     q: torch.Tensor,
@@ -30,6 +57,7 @@ def ring_flash_attn_varlen_forward(
     window_size=(-1, -1),
     alibi_slopes=None,
     deterministic=False,
+    npu_aux_stack=None,
 ):
     comm = RingComm(process_group)
 
@@ -39,7 +67,16 @@ def ring_flash_attn_varlen_forward(
 
     old_lse = False
     if torch.npu.is_available():
-        _npu_ring_aux_stack.clear()
+        local_len = cu_seqlens[-1].item() // comm.world_size
+        q_start = comm.rank * local_len
+        q_end = (comm.rank + 1) * local_len
+        npu_q_sub_cu, npu_q_sub_max = _compute_sub_cu_seqlens(
+            cu_seqlens, q_start, q_end
+        )
+        if npu_aux_stack is not None:
+            npu_aux_stack.clear()
+    else:
+        local_len = None
     for step in range(comm.world_size):
         if step + 1 != comm.world_size:
             next_k, next_v = comm.send_recv_kv(k, v)
@@ -85,17 +122,22 @@ def ring_flash_attn_varlen_forward(
                     q=q,
                     k=k,
                     v=v,
-                    cu_seqlens_q=cu_seqlens,
-                    cu_seqlens_k=cu_seqlens,
-                    max_seqlen_q=max_seqlen,
-                    max_seqlen_k=max_seqlen,
+                    cu_seqlens_q=npu_q_sub_cu,
+                    cu_seqlens_k=npu_q_sub_cu,
+                    max_seqlen_q=npu_q_sub_max,
+                    max_seqlen_k=npu_q_sub_max,
                     dropout_p=dropout_p,
                     softmax_scale=softmax_scale,
                     causal=causal and step == 0,
                     window_size=window_size,
                 )
-                _npu_ring_aux_stack.append((smax, ssum, block_out, seed, off, nels))
-                block_lse = smax[..., 0:1] + torch.log(ssum[..., 0:1])
+                if npu_aux_stack is not None:
+                    npu_aux_stack.append((smax, ssum, block_out, seed, off, nels, npu_q_sub_cu, npu_q_sub_max))
+                # CANN smax/ssum: [total_tokens, nheads, block_size]
+                # Reshape block_lse to [nheads, total_tokens] to match CUDA convention,
+                # so that update_out_and_lse's transpose(-2,-1).unsqueeze(-1) produces
+                # [total_tokens, nheads, 1] instead of [total_tokens, 1, nheads, 1].
+                block_lse = (smax[..., 0] + torch.log(ssum[..., 0])).transpose(0, 1)
             out, lse = update_out_and_lse(out, lse, block_out, block_lse)
 
         if step + 1 != comm.world_size:
@@ -218,6 +260,7 @@ def _ring_flash_attn_varlen_backward_npu(
     window_size=(-1, -1),
     alibi_slopes=None,
     deterministic=False,
+    npu_aux_stack=None,
 ):
     kv_comm = RingComm(process_group)
     d_kv_comm = RingComm(process_group)
@@ -226,20 +269,32 @@ def _ring_flash_attn_varlen_backward_npu(
 
     next_dk, next_dv = None, None
     next_k, next_v = None, None
+    aux_idx = 0
+
+    npu_sub_cu, npu_sub_max = None, 0
+    if torch.npu.is_available():
+        local_len = cu_seqlens[-1].item() // kv_comm.world_size
+        q_start = kv_comm.rank * local_len
+        q_end = (kv_comm.rank + 1) * local_len
+        npu_sub_cu, npu_sub_max = _compute_sub_cu_seqlens(
+            cu_seqlens, q_start, q_end
+        )
+
     for step in range(kv_comm.world_size):
         if step + 1 != kv_comm.world_size:
             next_k, next_v = kv_comm.send_recv_kv(k, v)
 
         if step <= kv_comm.rank or not causal:
-            smax, ssum, block_out, seed, off, nels = _npu_ring_aux_stack.pop()
+            smax, ssum, block_out, seed, off, nels, _, _ = npu_aux_stack[aux_idx]
+            aux_idx += 1
 
             bwd_causal = causal and step == 0
             dq_block, dk_block, dv_block = npu_fusion_attn_varlen_bwd(
                 dout, q, k, v, block_out, smax, ssum,
-                cu_seqlens_q=cu_seqlens,
-                cu_seqlens_k=cu_seqlens,
-                max_seqlen_q=max_seqlen,
-                max_seqlen_k=max_seqlen,
+                cu_seqlens_q=npu_sub_cu,
+                cu_seqlens_k=npu_sub_cu,
+                max_seqlen_q=npu_sub_max,
+                max_seqlen_k=npu_sub_max,
                 dropout_p=dropout_p,
                 softmax_scale=softmax_scale,
                 causal=bwd_causal,
@@ -289,6 +344,7 @@ def ring_flash_attn_varlen_backward(
     window_size=(-1, -1),
     alibi_slopes=None,
     deterministic=False,
+    npu_aux_stack=None,
 ):
     if _flash_attn_varlen_backward is not None:
         return _ring_flash_attn_varlen_backward_cuda(
@@ -300,6 +356,7 @@ def ring_flash_attn_varlen_backward(
         process_group, dout, q, k, v, out, softmax_lse,
         cu_seqlens, max_seqlen, softmax_scale, dropout_p,
         causal, window_size, alibi_slopes, deterministic,
+        npu_aux_stack=npu_aux_stack,
     )
 
 
@@ -327,6 +384,7 @@ class RingFlashAttnVarlenFunc(torch.autograd.Function):
         assert alibi_slopes is None
         k = k.contiguous()
         v = v.contiguous()
+        npu_aux_stack = []
         out, softmax_lse = ring_flash_attn_varlen_forward(
             group,
             q,
@@ -340,6 +398,7 @@ class RingFlashAttnVarlenFunc(torch.autograd.Function):
             window_size=window_size,
             alibi_slopes=alibi_slopes,
             deterministic=False,
+            npu_aux_stack=npu_aux_stack,
         )
         # this should be out_padded
         ctx.save_for_backward(q, k, v, out, softmax_lse, cu_seqlens)
@@ -351,6 +410,7 @@ class RingFlashAttnVarlenFunc(torch.autograd.Function):
         ctx.alibi_slopes = alibi_slopes
         ctx.deterministic = deterministic
         ctx.group = group
+        ctx._npu_aux_stack = npu_aux_stack
         return out if not return_softmax else (out, softmax_lse, None)
 
     @staticmethod
@@ -372,6 +432,7 @@ class RingFlashAttnVarlenFunc(torch.autograd.Function):
             window_size=ctx.window_size,
             alibi_slopes=ctx.alibi_slopes,
             deterministic=ctx.deterministic,
+            npu_aux_stack=getattr(ctx, '_npu_aux_stack', None),
         )
         return dq, dk, dv, None, None, None, None, None, None, None, None, None, None
 
