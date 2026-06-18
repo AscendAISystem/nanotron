@@ -162,7 +162,7 @@ def dummy_infinite_data_generator(
                     )[:, local_slice]
                     if dist.get_rank(parallel_context.pp_pg) == input_pp_rank
                     else TensorPointer(group_rank=input_pp_rank),
-                    "position_ids": position_ids[:, local_slice]
+                    "position_ids": position_ids  # NOTE: NOT sliced by CP; qwen.py expects global position_ids
                     if dist.get_rank(parallel_context.pp_pg) == input_pp_rank
                     else TensorPointer(group_rank=input_pp_rank),
                     "label_ids": torch.randint(

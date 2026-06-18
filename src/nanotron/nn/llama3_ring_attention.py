@@ -91,6 +91,7 @@ def llama3_flash_attn_varlen_forward(
     window_size=(-1, -1),
     alibi_slopes=None,
     deterministic=False,
+    npu_aux_stack=None,
 ):
     out_list = []
     lse_list = []
@@ -99,7 +100,9 @@ def llama3_flash_attn_varlen_forward(
     total_k, nheads_k, head_dim = k.shape
     assert nheads_k % heads_k_stride == 0, f"nheads_k={nheads_k} must be divisible by heads_k_stride={heads_k_stride}"
 
-    _npu_llama3_aux_stack.clear()
+    # Use per-call aux stack when provided to support multi-layer CP (AFAB fwd+bwd ordering)
+    aux_stack = _npu_llama3_aux_stack if npu_aux_stack is None else npu_aux_stack
+    aux_stack.clear()
     world_size = dist.get_world_size(process_group)
     kv_buffer = torch.empty(
         (2, total_k * world_size, heads_k_stride, head_dim),
@@ -174,7 +177,7 @@ def llama3_flash_attn_varlen_forward(
                 dropout_p=dropout_p, softmax_scale=softmax_scale,
                 causal=causal, window_size=window_size,
             )
-            _npu_llama3_aux_stack.append((smax, ssum, out_block, seed, off, nels))
+            aux_stack.append((smax, ssum, out_block, seed, off, nels))
             lse = smax[..., 0:1] + torch.log(ssum[..., 0:1])
         out_list.append(out_block)
         lse_list.append(lse)
@@ -343,6 +346,7 @@ def _llama3_flash_attn_varlen_backward_npu(
     window_size=(-1, -1),
     alibi_slopes=None,
     deterministic=False,
+    npu_aux_stack=None,
 ):
     nheads = q.shape[1]
     total_k, nheads_k, head_dim = k.shape
@@ -407,7 +411,8 @@ def _llama3_flash_attn_varlen_backward_npu(
         dk_i = dkv_buffer[0][local_k_slice]
         dv_i = dkv_buffer[1][local_k_slice]
 
-        smax, ssum, out_block, seed, off, nels = _npu_llama3_aux_stack.pop(0)
+        aux_stack = _npu_llama3_aux_stack if npu_aux_stack is None else npu_aux_stack
+        smax, ssum, out_block, seed, off, nels = aux_stack.pop(0)
         dq_i_out, dk_i_out, dv_i_out = npu_fusion_attn_varlen_bwd(
             dout=dout_i, q=q_i, k=k_i, v=v_i, out=out_i,
             softmax_max=smax, softmax_sum=ssum,
@@ -433,7 +438,8 @@ def _llama3_flash_attn_varlen_backward_npu(
             dk[:, i : i + heads_k_stride] = dk_i
             dv[:, i : i + heads_k_stride] = dv_i
 
-    _npu_llama3_aux_stack.clear()
+    if npu_aux_stack is None:
+        _npu_llama3_aux_stack.clear()
     return dq, dk, dv
 
 
@@ -457,6 +463,7 @@ def llama3_flash_attn_varlen_backward(
     window_size=(-1, -1),
     alibi_slopes=None,
     deterministic=False,
+    npu_aux_stack=None,
 ):
     if _flash_attn_varlen_backward is not None:
         return _llama3_flash_attn_varlen_backward_cuda(
@@ -470,6 +477,7 @@ def llama3_flash_attn_varlen_backward(
         cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
         heads_k_stride, local_k_slice, softmax_scale, dropout_p,
         causal, window_size, alibi_slopes, deterministic,
+        npu_aux_stack=npu_aux_stack,
     )
 
 
@@ -501,6 +509,8 @@ class Llama3FlashAttnVarlenFunc(torch.autograd.Function):
         assert alibi_slopes is None
         k = k.contiguous()
         v = v.contiguous()
+        # Each autograd Function call gets its own aux stack, so multi-layer CP works
+        ctx._npu_aux_stack = []
         out, softmax_lse = llama3_flash_attn_varlen_forward(
             group,
             q,
@@ -518,6 +528,7 @@ class Llama3FlashAttnVarlenFunc(torch.autograd.Function):
             window_size=window_size,
             alibi_slopes=alibi_slopes,
             deterministic=False,
+            npu_aux_stack=ctx._npu_aux_stack,
         )
         # this should be out_padded
         ctx.save_for_backward(q, k, v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k)
@@ -557,6 +568,7 @@ class Llama3FlashAttnVarlenFunc(torch.autograd.Function):
             window_size=ctx.window_size,
             alibi_slopes=ctx.alibi_slopes,
             deterministic=ctx.deterministic,
+            npu_aux_stack=ctx._npu_aux_stack,
         )
         return (dq, dk, dv) + (None,) * 15
 
