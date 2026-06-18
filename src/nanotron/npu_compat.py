@@ -1,5 +1,6 @@
 import contextlib
 import functools
+import os
 import warnings
 from typing import Any, Callable, Iterator, Optional, Union
 
@@ -88,23 +89,63 @@ def device_count() -> int:
 
 
 _NPU_DEVICE_MAP: Optional[dict] = None
+_NPU_BROKEN_DEVICES: list = []
 
 
 def _build_npu_device_map() -> dict:
-    """Build a mapping of local_rank -> physical device, skipping broken devices."""
-    global _NPU_DEVICE_MAP
+    """Build a mapping of local_rank -> physical device, skipping broken devices.
+
+    Respects NPU_VISIBLE_DEVICES env var: if set, maps 0..N-1 to visible devices
+    and only tests those. Without the env var, tests all physical devices and
+    skips any that raise on set_device.
+    """
+    global _NPU_DEVICE_MAP, _NPU_BROKEN_DEVICES
     if _NPU_DEVICE_MAP is not None:
         return _NPU_DEVICE_MAP
     mod = device_mod()
-    total = mod.device_count() if mod is not None else 0
+    if mod is None:
+        _NPU_DEVICE_MAP = {}
+        return _NPU_DEVICE_MAP
+
+    # Check NPU_VISIBLE_DEVICES
+    visible_str = os.environ.get("NPU_VISIBLE_DEVICES", "")
+    if visible_str.strip():
+        visible = [int(x.strip()) for x in visible_str.split(",") if x.strip()]
+        physical = []
+        _NPU_BROKEN_DEVICES = []
+        for v in visible:
+            try:
+                mod.set_device(v)
+                physical.append(v)
+            except Exception as e:
+                _NPU_BROKEN_DEVICES.append(v)
+                warnings.warn(f"Skipping damaged NPU device {v}: {e}")
+        _NPU_DEVICE_MAP = {idx: phys for idx, phys in enumerate(physical)}
+        if _NPU_BROKEN_DEVICES:
+            warnings.warn(
+                f"Broken NPU devices detected: {_NPU_BROKEN_DEVICES}. "
+                f"Mapping: {_NPU_DEVICE_MAP}"
+            )
+        return _NPU_DEVICE_MAP
+
+    # No env var: probe all devices
+    total = mod.device_count()
     physical = []
+    _NPU_BROKEN_DEVICES = []
     for i in range(total):
         try:
             mod.set_device(i)
             physical.append(i)
-        except Exception:
-            pass
+        except Exception as e:
+            _NPU_BROKEN_DEVICES.append(i)
+            warnings.warn(f"Skipping damaged NPU device {i}: {e}")
     _NPU_DEVICE_MAP = {idx: phys for idx, phys in enumerate(physical)}
+    if _NPU_BROKEN_DEVICES:
+        warnings.warn(
+            f"Broken NPU devices detected: {_NPU_BROKEN_DEVICES}. "
+            f"Mapping: {_NPU_DEVICE_MAP}. "
+            f"Consider setting NPU_VISIBLE_DEVICES to only working devices."
+        )
     return _NPU_DEVICE_MAP
 
 

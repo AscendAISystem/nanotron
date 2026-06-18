@@ -358,25 +358,13 @@ def init_optimizer_and_grad_accumulator(
         if optimizer_args.optimizer_factory.name == "adamW":
 
             def optimizer(param_groups):
-                if is_npu_available():
-                    return torch.optim.AdamW(
-                        param_groups,
-                        lr=optimizer_args.learning_rate_scheduler.learning_rate,
-                        weight_decay=optimizer_args.weight_decay,
-                        eps=optimizer_args.optimizer_factory.adam_eps,
-                        betas=(
-                            optimizer_args.optimizer_factory.adam_beta1,
-                            optimizer_args.optimizer_factory.adam_beta2,
-                        ),
-                        fused=False,
-                    )
                 return torch.optim.AdamW(
                     param_groups,
                     lr=optimizer_args.learning_rate_scheduler.learning_rate,
                     weight_decay=optimizer_args.weight_decay,
                     eps=optimizer_args.optimizer_factory.adam_eps,
                     betas=(optimizer_args.optimizer_factory.adam_beta1, optimizer_args.optimizer_factory.adam_beta2),
-                    fused=optimizer_args.optimizer_factory.torch_adam_is_fused,
+                    fused=True if is_npu_available() else optimizer_args.optimizer_factory.torch_adam_is_fused,
                 )
 
         elif optimizer_args.optimizer_factory.name == "sgd":
