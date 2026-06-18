@@ -1052,8 +1052,6 @@ class DistributedTrainer:
             reloaded_from_checkpoint = True
         if not reloaded_from_checkpoint:
             log_rank("No checkpoint path provided.", logger=logger, level=logging.INFO, rank=0)
-            if self.parallel_context.context_parallel_size > 1:
-                raise NotImplementedError("Init with Context parallel size > 1 not supported yet")
             if isinstance(self.config.model.init_method, ExistingCheckpointInit):
                 # Initialize model from an pretrained model checkpoint (without optimizer, lr_scheduler...)
                 self.param_shard_metadata = load_weights(
@@ -1066,8 +1064,9 @@ class DistributedTrainer:
 
                 # Synchronize parameters so that the model is consistent
                 # sync all params across dp
+                sync_pg = self.parallel_context.dp_pg if self.parallel_context.context_parallel_size <= 1 else self.parallel_context.dp_cp_pg
                 for _, param in sorted(model.named_parameters(), key=lambda x: x[0]):
-                    dist.all_reduce(param.data, op=dist.ReduceOp.AVG, group=self.parallel_context.dp_pg)
+                    dist.all_reduce(param.data, op=dist.ReduceOp.AVG, group=sync_pg)
 
                 # sync tied params across tied groups
                 for (_, group_ranks), param in sorted(
