@@ -95,9 +95,10 @@ _NPU_BROKEN_DEVICES: list = []
 def _build_npu_device_map() -> dict:
     """Build a mapping of local_rank -> physical device, skipping broken devices.
 
-    Respects NPU_VISIBLE_DEVICES env var: if set, maps 0..N-1 to visible devices
-    and only tests those. Without the env var, tests all physical devices and
-    skips any that raise on set_device.
+    Ascend env var ASCEND_RT_VISIBLE_DEVICES is respected (native support via
+    torch_npu). When set, device_count() already reflects the filtered set, but
+    individual devices within that set may still be broken — we probe each one.
+    Without the env var, all physical devices are probed and broken ones skipped.
     """
     global _NPU_DEVICE_MAP, _NPU_BROKEN_DEVICES
     if _NPU_DEVICE_MAP is not None:
@@ -107,28 +108,6 @@ def _build_npu_device_map() -> dict:
         _NPU_DEVICE_MAP = {}
         return _NPU_DEVICE_MAP
 
-    # Check NPU_VISIBLE_DEVICES
-    visible_str = os.environ.get("NPU_VISIBLE_DEVICES", "")
-    if visible_str.strip():
-        visible = [int(x.strip()) for x in visible_str.split(",") if x.strip()]
-        physical = []
-        _NPU_BROKEN_DEVICES = []
-        for v in visible:
-            try:
-                mod.set_device(v)
-                physical.append(v)
-            except Exception as e:
-                _NPU_BROKEN_DEVICES.append(v)
-                warnings.warn(f"Skipping damaged NPU device {v}: {e}")
-        _NPU_DEVICE_MAP = {idx: phys for idx, phys in enumerate(physical)}
-        if _NPU_BROKEN_DEVICES:
-            warnings.warn(
-                f"Broken NPU devices detected: {_NPU_BROKEN_DEVICES}. "
-                f"Mapping: {_NPU_DEVICE_MAP}"
-            )
-        return _NPU_DEVICE_MAP
-
-    # No env var: probe all devices
     total = mod.device_count()
     physical = []
     _NPU_BROKEN_DEVICES = []
@@ -144,8 +123,9 @@ def _build_npu_device_map() -> dict:
         warnings.warn(
             f"Broken NPU devices detected: {_NPU_BROKEN_DEVICES}. "
             f"Mapping: {_NPU_DEVICE_MAP}. "
-            f"Consider setting NPU_VISIBLE_DEVICES to only working devices."
+            f"Use ASCEND_RT_VISIBLE_DEVICES to exclude broken devices."
         )
+    return _NPU_DEVICE_MAP
     return _NPU_DEVICE_MAP
 
 

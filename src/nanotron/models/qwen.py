@@ -325,8 +325,9 @@ class Qwen2Attention(LogMixin, nn.Module):
 
         if self.log_attn_probs:
             attn_output, attn_probs, _ = attn_output
-            # log attn_probs
-            self.tbi_logger({"attn_probs": attn_probs})
+            # log attn_probs if available
+            if attn_probs is not None:
+                self.tbi_logger({"attn_probs": attn_probs})
         # flash_attn use rearrange instead of reshape https://github.com/Dao-AILab/flash-attention/blob/1a58058a6da83bd7baaf4c512e8a1abe0240bb77/flash_attn/modules/mha.py#L730
         return attn_output.reshape(-1, self.local_num_heads * self.head_dim)  # [b*s, num_heads*head_dim]
 

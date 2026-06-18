@@ -168,7 +168,9 @@ def npu_flash_attn_varlen_func(
         dropout_p=dropout_p, softmax_scale=softmax_scale,
         causal=causal, window_size=window_size,
     )
-    return (out, None) if return_attn_probs else out
+    if return_attn_probs:
+        return out, None, None
+    return out
 
 
 def npu_flash_attn_with_kvcache(
@@ -240,7 +242,20 @@ def npu_flash_attn_varlen_kvpacked_func(
     causal: bool = False,
     **kwargs,
 ):
-    k, v = kv[..., 0], kv[..., 1]
+    # kv shape: [T, 2, kv_heads, head_dim]; split into k/v via dim=1
+    k, v = kv[:, 0], kv[:, 1]
+
+    # Handle GQA: expand k/v heads to match q heads
+    n_heads = q.size(1)
+    n_kv_heads = k.size(1)
+    if n_kv_heads < n_heads:
+        assert n_heads % n_kv_heads == 0, f"q_heads({n_heads}) not divisible by kv_heads({n_kv_heads})"
+        repeat = n_heads // n_kv_heads
+        k = k.repeat_interleave(repeat, dim=1)
+        v = v.repeat_interleave(repeat, dim=1)
+
+    return_attn_probs = kwargs.pop("return_attn_probs", False)
+
     return npu_flash_attn_varlen_func(
         q, k, v,
         cu_seqlens_q=cu_seqlens_q,
@@ -250,6 +265,7 @@ def npu_flash_attn_varlen_kvpacked_func(
         dropout_p=dropout_p,
         softmax_scale=softmax_scale,
         causal=causal,
+        return_attn_probs=return_attn_probs,
     )
 
 

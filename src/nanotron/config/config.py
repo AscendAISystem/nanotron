@@ -14,7 +14,15 @@ from transformers import AutoTokenizer
 from yaml.loader import SafeLoader
 
 from nanotron.config.lighteval_config import LightEvalConfig
-from nanotron.config.models_config import ExistingCheckpointInit, NanotronConfigs, RandomInit, SpectralMupInit
+from nanotron.config.models_config import (
+    ExistingCheckpointInit,
+    LlamaConfig,
+    NanotronConfigs,
+    Qwen2Config,
+    RandomInit,
+    SpectralMupInit,
+    Starcoder2Config,
+)
 from nanotron.config.parallelism_config import ParallelismArgs
 from nanotron.config.utils_config import (
     InitScalingMethod,
@@ -27,7 +35,6 @@ from nanotron.generation.sampler import SamplerType
 from nanotron.logging import get_logger, human_format
 from nanotron.parallel.pipeline_parallel.engine import PipelineEngine
 from nanotron.parallel.tensor_parallel.nn import TensorParallelLinearMode
-from nanotron.config.models_config import Qwen2Config
 
 logger = get_logger(__name__)
 
@@ -319,7 +326,12 @@ class ModelArgs:
             self.dtype = cast_str_to_torch_dtype(self.dtype)
 
         if isinstance(self.model_config, dict):
-            self.model_config = Qwen2Config(**self.model_config)
+            if "is_starcoder2_config" in self.model_config and self.model_config["is_starcoder2_config"]:
+                self.model_config = Starcoder2Config(**self.model_config)
+            elif "is_llama_config" in self.model_config and self.model_config["is_llama_config"]:
+                self.model_config = LlamaConfig(**self.model_config)
+            else:
+                self.model_config = Qwen2Config(**self.model_config)
 
         self.model_config._is_using_mup = isinstance(self.init_method, SpectralMupInit)
 
@@ -533,18 +545,22 @@ class Config:
         #     assert self.tokenizer.tokenizer_name_or_path is not None
 
         # Model verifications
+        # Support both Llama/Qwen2 (num_key_value_heads) and Starcoder2 (num_kv_heads)
+        num_kv_heads = getattr(self.model.model_config, "num_key_value_heads", None) or getattr(
+            self.model.model_config, "num_kv_heads", None
+        )
         assert (
             self.model.model_config.num_attention_heads % self.parallelism.tp == 0
         ), f"num_attention_heads ({self.model.model_config.num_attention_heads}) must be divisible by tp ({self.parallelism.tp})"
         assert (
-            self.model.model_config.num_attention_heads >= self.model.model_config.num_key_value_heads
-        ), f"num_attention_heads ({self.model.model_config.num_attention_heads}) must be >= num_key_value_heads ({self.model.model_config.num_key_value_heads})"
+            self.model.model_config.num_attention_heads >= num_kv_heads
+        ), f"num_attention_heads ({self.model.model_config.num_attention_heads}) must be >= num_key_value_heads ({num_kv_heads})"
         assert (
-            self.model.model_config.num_key_value_heads >= self.parallelism.tp
-        ), f"num_key_value_heads ({self.model.model_config.num_key_value_heads}) must be >= tp ({self.parallelism.tp})"  # TODO: remove this once we ensure KV heads get duplicated correctly
+            num_kv_heads >= self.parallelism.tp
+        ), f"num_key_value_heads ({num_kv_heads}) must be >= tp ({self.parallelism.tp})"  # TODO: remove this once we ensure KV heads get duplicated correctly
         assert (
-            self.model.model_config.num_attention_heads % self.model.model_config.num_key_value_heads == 0
-        ), f"num_attention_heads ({self.model.model_config.num_attention_heads}) must be divisible by num_key_value_heads ({self.model.model_config.num_key_value_heads})"
+            self.model.model_config.num_attention_heads % num_kv_heads == 0
+        ), f"num_attention_heads ({self.model.model_config.num_attention_heads}) must be divisible by num_key_value_heads ({num_kv_heads})"
 
         # data_stages
         if self.data_stages is not None:
@@ -588,8 +604,11 @@ class Config:
         print(f"num_layers: {self.model.model_config.num_hidden_layers}")
         print(f"intermediate_size: {self.model.model_config.intermediate_size}")
         print(f"num_attention_heads: {self.model.model_config.num_attention_heads}")
-        print(f"num_key_value_heads: {self.model.model_config.num_key_value_heads}")
-        print(f"tie_word_embeddings: {self.model.model_config.tie_word_embeddings}")
+        num_kv_heads = getattr(self.model.model_config, "num_key_value_heads", None) or getattr(
+            self.model.model_config, "num_kv_heads", None
+        )
+        print(f"num_key_value_heads: {num_kv_heads}")
+        print(f"tie_word_embeddings: {getattr(self.model.model_config, 'tie_word_embeddings', 'N/A')}")
         print(f"vocab_size: {self.model.model_config.vocab_size}")
         print(f"num_params: {_calculate_model_params(self)}")
 

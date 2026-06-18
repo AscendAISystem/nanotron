@@ -1533,6 +1533,13 @@ class Starcoder2ForTraining(NanotronModel):
 
             elif isinstance(module, TensorParallelEmbedding):
                 nn.init.normal_(module.weight, mean=0.0, std=std)
+            elif isinstance(module, nn.ParameterDict):
+                if "weight" == param_name:
+                    nn.init.normal_(param, mean=0.0, std=std)
+                elif "bias" == param_name:
+                    param.zero_()
+                else:
+                    raise ValueError(f"Who the fuck is {param_name}?")
             else:
                 raise Exception(f"Parameter {full_param_name} was not initialized")
 
