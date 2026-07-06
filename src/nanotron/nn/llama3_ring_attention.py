@@ -1,11 +1,10 @@
 """Ring attention implementation using flash attention adapted from https://github.com/zhuzilin/ring-flash-attention/"""
 
+import sys
 import torch
 import torch.distributed as dist
-from flash_attn.flash_attn_interface import (
-    _flash_attn_varlen_forward,
-    _flash_attn_varlen_backward,
-)
+
+from nanotron.npu_utils import is_npu_available
 
 def llama3_flash_attn_prepare_cu_seqlens(
     cu_seqlens: torch.Tensor, causal: bool, rank: int, world_size: int
@@ -78,6 +77,13 @@ def llama3_flash_attn_varlen_forward(
     alibi_slopes=None,
     deterministic=False,
 ):
+    if is_npu_available():
+        raise RuntimeError(
+            "llama3_flash_attn_varlen_forward requires flash_attn, "
+            "which is not available on NPU. Use 'sdpa' or 'flash_attention_2' instead."
+        )
+    from flash_attn.flash_attn_interface import _flash_attn_varlen_forward
+
     out_list = []
     lse_list = []
 

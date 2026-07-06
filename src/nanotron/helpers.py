@@ -505,8 +505,25 @@ def get_profiler(config: Config):
         else:
             on_trace_ready = None
 
+        # NPU 适配：NPU 时使用 ProfilerActivity.NPU，不可用时降级跳过
+        from nanotron.npu_utils import is_npu_available
+
+        if is_npu_available():
+            if hasattr(ProfilerActivity, "NPU"):
+                activities = [ProfilerActivity.CPU, ProfilerActivity.NPU]
+            else:
+                log_rank(
+                    "ProfilerActivity.NPU is not available in this torch_npu version, skipping profiler",
+                    logger=logger,
+                    level=logging.WARNING,
+                    rank=0,
+                )
+                return contextlib.nullcontext()
+        else:
+            activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA]
+
         prof = profile(
-            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            activities=activities,
             schedule=torch.profiler.schedule(
                 wait=config.profiler.wait,
                 warmup=config.profiler.warmup,

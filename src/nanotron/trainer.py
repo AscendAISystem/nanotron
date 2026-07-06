@@ -551,7 +551,11 @@ class DistributedTrainer:
         with prof:
             for self.iteration_step in range(self.initial_iter_step, self.last_iter_step + 1):
                 if isinstance(prof, torch.profiler.profile):
-                    logger.info(f"Profiler on for step {self.iteration_step}")
+                    # 设备感知日志：NPU 还是 CUDA
+                    from nanotron.npu_utils import is_npu_available
+
+                    device_type = "NPU" if is_npu_available() else "CUDA"
+                    logger.info(f"Profiler ({device_type}) on for step {self.iteration_step}")
                     prof.step()
 
                 # Use CUDA event-based timing for more accurate GPU-side elapsed time measurement

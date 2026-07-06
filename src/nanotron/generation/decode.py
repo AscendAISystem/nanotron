@@ -20,7 +20,7 @@ from nanotron.parallel.pipeline_parallel.context_manager import attach_pipeline_
 from nanotron.parallel.pipeline_parallel.p2p import P2PTensorMetaData, view_as_contiguous
 from nanotron.parallel.pipeline_parallel.state import PipelineEvalBatchState
 from nanotron.parallel.pipeline_parallel.tensor_pointer import TensorPointer
-from nanotron.npu_utils import get_current_device
+from nanotron.npu_utils import get_current_device, get_device_handle
 from nanotron.utils import get_untyped_storage
 
 if TYPE_CHECKING:
@@ -281,7 +281,7 @@ def decode_text(
             for generation_iter in tqdm(range(max_new_tokens), desc="Generating"):
 
                 if is_bench and generation_iter == 0:
-                    torch.cuda.synchronize()
+                    get_device_handle().synchronize()
                     elapsed_time_first_iteration = start_time - time.perf_counter()
 
                 all_new_decoder_input_ids_and_mask_same_rank: List[
@@ -435,7 +435,7 @@ def decode_text(
 
             if is_bench:
                 # Compute throughput (tok/s/gpu). Note that the first generation is done with full seq_len, so we don't count it.
-                torch.cuda.synchronize()
+                get_device_handle().synchronize()
                 total_time_sec = time.perf_counter() - start_time - elapsed_time_first_iteration
                 # We generate 1 token per iteration per batch (batch=microbatch)
                 # Number of tokens generated every iteration: gbs/iteration_time

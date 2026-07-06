@@ -64,6 +64,54 @@ jobs:
         --ignore tests/nanoset \
         --verbose \
         tests/
+
+  # NPU CI runner — runs in parallel with CUDA CI
+  tests-npu:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+    runs-on:
+      group: ascend-910
+    container:
+      image: ascendhub.huawei.com/public-ascendhub/ascend-pytorch:23.0.rc1-ubuntu22.04
+      ports:
+        - 80
+      options: --device /dev/davinci0 --device /dev/davinci1 --device /dev/davinci2 --device /dev/davinci3 --device /dev/davinci4 --device /dev/davinci5 --device /dev/davinci6 --device /dev/davinci7 --shm-size "8G"
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Python environment
+      run: |
+        which python
+        python --version
+
+    - name: Check NPU availability
+      run: |
+        python -c "import torch; print('torch:', torch.__version__, torch)"
+        python -c "import torch; print('NPU available:', torch.npu.is_available()); assert torch.npu.is_available(), 'NPU is required for this job'"
+
+    - name: Install nanotron's dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install packaging
+        pip install wheel
+        pip install -e .
+        pip install -e .[dev]
+        pip install -e .[test]
+
+    - name: Show installed libraries and their versions
+      run: pip freeze | tee installed.txt
+
+    - name: Run nanotron tests
+      # On NPU, flash-attn is not available; run non-FA2 tests (3D parallelism, etc.)
+      run: |
+        pytest \
+        -m "not fa2" \
+        --color=yes \
+        --durations=0 \
+        --ignore tests/kernels \
+        --ignore tests/fp8 \
+        --ignore tests/nanoset \
+        --verbose \
+        tests/
     # NOTE: T4 can't run FA2, DoReMi's LLaMa needs FÀ
     # - name: Run DoReMi tests
     #   # NOTE: -m "not fa2" will run all the unit tests that don't have the mark
