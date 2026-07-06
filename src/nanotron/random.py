@@ -8,7 +8,7 @@ import torch
 
 from nanotron import distributed as dist
 from nanotron.distributed import ProcessGroup
-from nanotron.npu_utils import get_current_device
+from nanotron.npu_utils import get_current_device, get_device_handle, is_npu_available
 
 
 @dataclass
@@ -74,8 +74,8 @@ class RandomStates(MutableMapping[str, RandomState]):
 
 def set_random_seed(seed: int):
     torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
+    if torch.cuda.is_available() or is_npu_available():
+        get_device_handle().manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
 
@@ -84,8 +84,8 @@ def set_random_state(random_state: RandomState):
     random.setstate(random_state.random)
     np.random.set_state(random_state.numpy)
     torch.set_rng_state(random_state.torch_cpu)
-    if torch.cuda.is_available():
-        torch.cuda.set_rng_state(random_state.torch_cuda, "cuda")
+    if torch.cuda.is_available() or is_npu_available():
+        get_device_handle().set_rng_state(random_state.torch_cuda)
     else:
         assert random_state.torch_cuda is None
 
@@ -96,7 +96,7 @@ def get_current_random_state():
         random=random.getstate(),
         numpy=np.random.get_state(),
         torch_cpu=torch.random.get_rng_state(),
-        torch_cuda=torch.cuda.get_rng_state("cuda") if torch.cuda.is_available() else None,
+        torch_cuda=get_device_handle().get_rng_state() if (torch.cuda.is_available() or is_npu_available()) else None,
     )
 
 

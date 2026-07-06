@@ -1,12 +1,22 @@
 import torch
-from flash_attn.layers.rotary import apply_rotary_emb as flash_apply_rotary_emb
 from torch import nn
-from flash_attn.layers.rotary import RotaryEmbedding as OrigFlashRotaryEmbedding
 from einops import rearrange
 from nanotron import logging
 from nanotron.logging import warn_once
-from nanotron.npu_utils import get_current_device
+from nanotron.npu_utils import get_current_device, is_npu_available
+
 logger = logging.get_logger(__name__)
+
+# flash_attn is CUDA-only; guard import for NPU environments
+try:
+    from flash_attn.layers.rotary import apply_rotary_emb as flash_apply_rotary_emb
+    from flash_attn.layers.rotary import RotaryEmbedding as OrigFlashRotaryEmbedding
+
+    _flash_attn_rotary_available = True
+except ImportError:
+    flash_apply_rotary_emb = None
+    OrigFlashRotaryEmbedding = None
+    _flash_attn_rotary_available = False
 
 
 class RotaryEmbedding(nn.Module):
@@ -133,9 +143,15 @@ class RotaryEmbedding(nn.Module):
             -1, seq_length, rotary_part.shape[1], rotary_part.shape[2]
         )  # [b, s, nheads, dim/2]
         if self.fused:
-            rotated_tensor = flash_apply_rotary_emb(
-                rotary_part, self.cos_values, self.sin_values, interleaved=self.interleaved, inplace=True
-            )
+            if is_npu_available():
+                # NPU: flash_attn unavailable, use pure PyTorch rotation
+                rotated_tensor = (rotary_part * self.cos_values.unsqueeze(1)) + (
+                    self.rotate_half(rotary_part) * self.sin_values.unsqueeze(1)
+                )
+            else:
+                rotated_tensor = flash_apply_rotary_emb(
+                    rotary_part, self.cos_values, self.sin_values, interleaved=self.interleaved, inplace=True
+                )
             # TODO @nouamane: support cu_seqlens from position_ids
         else:
             rotated_tensor = (rotary_part * self.cos_values.unsqueeze(1)) + (
@@ -147,76 +163,111 @@ class RotaryEmbedding(nn.Module):
             return torch.cat((rotated_tensor, pass_through_part), dim=-1)
         return rotated_tensor
     
-class FlashRotaryEmbedding(OrigFlashRotaryEmbedding):
+if _flash_attn_rotary_available:
 
-    def __init__(
-        self,
-        dim: int,
-        base=10000.0,
-        interleaved=False,
-        scale_base=None,
-        pos_idx_in_fp32=True,
-        device=None,
-        seq_len_interpolation_factor=None,
-    ):
-        super().__init__(
-            dim,
-            base,
-            interleaved,
-            scale_base,
-            pos_idx_in_fp32,
-            device,
-        )
-        self.seq_len_interpolation_factor = seq_len_interpolation_factor
+    class FlashRotaryEmbedding(OrigFlashRotaryEmbedding):
 
-    def _update_cos_sin_cache(self, seqlen, device=None, dtype=None):
-        # Reset the tables if the sequence length has changed,
-        # if we're on a new device (possibly due to tracing for instance),
-        # or if we're switching from inference mode to training
-        if (
-            seqlen > self._seq_len_cached
-            or self._cos_cached is None
-            or self._cos_cached.device != device
-            or self._cos_cached.dtype != dtype
-            or (self.training and self._cos_cached.is_inference())
+        def __init__(
+            self,
+            dim: int,
+            base=10000.0,
+            interleaved=False,
+            scale_base=None,
+            pos_idx_in_fp32=True,
+            device=None,
+            seq_len_interpolation_factor=None,
         ):
-            self._seq_len_cached = seqlen
-            # We want fp32 here, not self.inv_freq.dtype, since the model could be loaded in bf16
-            # And the output of arange can be quite large, so bf16 would lose a lot of precision.
-            # However, for compatibility reason, we add an option to use the dtype of self.inv_freq.
-            if self.pos_idx_in_fp32:
-                t = torch.arange(seqlen, device=device, dtype=torch.float32)
-                # We want fp32 here as well since inv_freq will be multiplied with t, and the output
-                # will be large. Having it in bf16 will lose a lot of precision and cause the
-                # cos & sin output to change significantly.
-                # We want to recompute self.inv_freq if it was not loaded in fp32
-                if self.inv_freq.dtype != torch.float32:
-                    inv_freq = self._compute_inv_freq(device=device)
+            super().__init__(
+                dim,
+                base,
+                interleaved,
+                scale_base,
+                pos_idx_in_fp32,
+                device,
+            )
+            self.seq_len_interpolation_factor = seq_len_interpolation_factor
+
+        def _update_cos_sin_cache(self, seqlen, device=None, dtype=None):
+            # Reset the tables if the sequence length has changed,
+            # if we're on a new device (possibly due to tracing for instance),
+            # or if we're switching from inference mode to training
+            if (
+                seqlen > self._seq_len_cached
+                or self._cos_cached is None
+                or self._cos_cached.device != device
+                or self._cos_cached.dtype != dtype
+                or (self.training and self._cos_cached.is_inference())
+            ):
+                self._seq_len_cached = seqlen
+                # We want fp32 here, not self.inv_freq.dtype, since the model could be loaded in bf16
+                # And the output of arange can be quite large, so bf16 would lose a lot of precision.
+                # However, for compatibility reason, we add an option to use the dtype of self.inv_freq.
+                if self.pos_idx_in_fp32:
+                    t = torch.arange(seqlen, device=device, dtype=torch.float32)
+                    # We want fp32 here as well since inv_freq will be multiplied with t, and the output
+                    # will be large. Having it in bf16 will lose a lot of precision and cause the
+                    # cos & sin output to change significantly.
+                    # We want to recompute self.inv_freq if it was not loaded in fp32
+                    if self.inv_freq.dtype != torch.float32:
+                        inv_freq = self._compute_inv_freq(device=device)
+                    else:
+                        inv_freq = self.inv_freq
                 else:
+                    t = torch.arange(seqlen, device=device, dtype=self.inv_freq.dtype)
                     inv_freq = self.inv_freq
-            else:
-                t = torch.arange(seqlen, device=device, dtype=self.inv_freq.dtype)
-                inv_freq = self.inv_freq
 
-            # fixed linear scaling
-            if self.seq_len_interpolation_factor is not None:
-                warn_once(f"seq_len_interpolation_factor is set to {self.seq_len_interpolation_factor}", logger, rank=0)
-                t *= 1 / self.seq_len_interpolation_factor
+                # fixed linear scaling
+                if self.seq_len_interpolation_factor is not None:
+                    warn_once(f"seq_len_interpolation_factor is set to {self.seq_len_interpolation_factor}", logger, rank=0)
+                    t *= 1 / self.seq_len_interpolation_factor
 
-            # Don't do einsum, it converts fp32 to fp16 under AMP
-            # freqs = torch.einsum("i,j->ij", t, self.inv_freq)
-            freqs = torch.outer(t, inv_freq)
-            if self.scale is None:
-                self._cos_cached = torch.cos(freqs).to(dtype)
-                self._sin_cached = torch.sin(freqs).to(dtype)
-            else:
-                power = (
-                    torch.arange(seqlen, dtype=self.scale.dtype, device=self.scale.device)
-                    - seqlen // 2
-                ) / self.scale_base
-                scale = self.scale.to(device=power.device) ** rearrange(power, "s -> s 1")
-                # We want the multiplication by scale to happen in fp32
-                self._cos_cached = (torch.cos(freqs) * scale).to(dtype)
-                self._sin_cached = (torch.sin(freqs) * scale).to(dtype)
-                self._cos_k_cached = (torch.cos(freqs) / scale).to(dtype)
-                self._sin_k_cached = (torch.sin(freqs) / scale).to(dtype)
+                # Don't do einsum, it converts fp32 to fp16 under AMP
+                # freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+                freqs = torch.outer(t, inv_freq)
+                if self.scale is None:
+                    self._cos_cached = torch.cos(freqs).to(dtype)
+                    self._sin_cached = torch.sin(freqs).to(dtype)
+                else:
+                    power = (
+                        torch.arange(seqlen, dtype=self.scale.dtype, device=self.scale.device)
+                        - seqlen // 2
+                    ) / self.scale_base
+                    scale = self.scale.to(device=power.device) ** rearrange(power, "s -> s 1")
+                    # We want the multiplication by scale to happen in fp32
+                    self._cos_cached = (torch.cos(freqs) * scale).to(dtype)
+                    self._sin_cached = (torch.sin(freqs) * scale).to(dtype)
+                    self._cos_k_cached = (torch.cos(freqs) / scale).to(dtype)
+                    self._sin_k_cached = (torch.sin(freqs) / scale).to(dtype)
+
+else:
+
+    class FlashRotaryEmbedding(RotaryEmbedding):
+        """NPU fallback: flash_attn not available, use pure PyTorch RotaryEmbedding.
+
+        Maps FlashRotaryEmbedding parameters to RotaryEmbedding for NPU compatibility.
+        The _update_cos_sin_cache method is a no-op since RotaryEmbedding computes
+        cos/sin on-the-fly in forward().
+        """
+
+        def __init__(
+            self,
+            dim: int,
+            base=10000.0,
+            interleaved=False,
+            scale_base=None,
+            pos_idx_in_fp32=True,
+            device=None,
+            seq_len_interpolation_factor=None,
+        ):
+            super().__init__(
+                dim=dim,
+                max_seq_len=0,
+                base=base,
+                interleaved=interleaved,
+                seq_len_scaling_factor=seq_len_interpolation_factor,
+                fused=False,
+            )
+
+        def _update_cos_sin_cache(self, seqlen, device=None, dtype=None):
+            """No-op: RotaryEmbedding(base class) computes cos/sin in forward()."""
+            pass
