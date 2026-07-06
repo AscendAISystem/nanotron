@@ -297,12 +297,20 @@ else:
                 seq_length = q.shape[1]
                 # Compute rotary embeddings
                 freqs = super().forward(seq_length=seq_length, position_offset=seqlen_offset)
-                # Apply to q
-                q = self.apply_rotary_pos_emb(q, freqs, seq_length=seq_length)
+                # apply_rotary_pos_emb expects 3D [batch*seq, n_heads, head_dim], flatten 4D to 3D
+                batch_size = q.shape[0]
+                q_flat = q.reshape(-1, q.shape[2], q.shape[3])
+                q_out = self.apply_rotary_pos_emb(q_flat, freqs, seq_length=seq_length)
+                q = q_out.view(batch_size, seq_length, q.shape[2], q.shape[3])
                 # Apply to kv: kv shape [batch, seq, 2, n_kv_heads, head_dim]
                 k = kv[..., 0, :, :]  # [batch, seq, n_kv_heads, head_dim]
                 v = kv[..., 1, :, :]  # [batch, seq, n_kv_heads, head_dim]
-                k = self.apply_rotary_pos_emb(k, freqs, seq_length=seq_length)
+                k_flat = k.reshape(-1, k.shape[2], k.shape[3])
+                v_flat = v.reshape(-1, v.shape[2], v.shape[3])
+                k_out = self.apply_rotary_pos_emb(k_flat, freqs, seq_length=seq_length)
+                v_out = self.apply_rotary_pos_emb(v_flat, freqs, seq_length=seq_length)
+                k = k_out.view(batch_size, seq_length, k.shape[2], k.shape[3])
+                v = v_out.view(batch_size, seq_length, v.shape[2], v.shape[3])
                 # Re-pack kv
                 kv = torch.stack([k, v], dim=2)
                 return q, kv
@@ -310,4 +318,10 @@ else:
                 # Single tensor (inference path)
                 seq_length = x.shape[1] if x.dim() >= 3 else x.shape[0]
                 freqs = super().forward(seq_length=seq_length, position_offset=seqlen_offset)
+                if x.dim() == 4:
+                    # Reshape 4D to 3D for apply_rotary_pos_emb
+                    batch_size, seq_len, n_heads, head_dim = x.shape
+                    x_flat = x.reshape(-1, n_heads, head_dim)
+                    x_out = self.apply_rotary_pos_emb(x_flat, freqs, seq_length=seq_len)
+                    return x_out.view(batch_size, seq_len, n_heads, head_dim)
                 return self.apply_rotary_pos_emb(x, freqs, seq_length=seq_length)
