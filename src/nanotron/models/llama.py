@@ -814,7 +814,11 @@ class CausalSelfAttention(nn.Module, AttachableStore):
                 key_states = self.flash_rotary_embedding(key_states)
             else:
                 # For the non-interleaved LlamaRotaryEmbedding, use cos/sin
-                cos, sin = self.rotary_embedding(value_states, None)
+                # Generate position_ids from the sequence length
+                seq_length = value_states.shape[1]
+                position_ids = torch.arange(seq_length, dtype=torch.long, device=value_states.device)
+                position_ids = position_ids.unsqueeze(0).expand(batch_size, -1)
+                cos, sin = self.rotary_embedding(value_states, position_ids)
                 query_states, key_states = self.rotary_embedding.apply_rotary_pos_emb(
                     query_states, key_states, cos, sin
                 )
