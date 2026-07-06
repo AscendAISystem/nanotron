@@ -272,28 +272,34 @@ else:
             """No-op: RotaryEmbedding(base class) computes cos/sin in forward()."""
             pass
 
-        def forward(self, x, seqlen_offset=0, max_seqlen=None):
-            """Flash-attn compatible forward: apply rotary embedding to `x`.
+        def forward(self, x, *args, **kwargs):
+            """Flash-attn compatible forward: apply rotary embedding.
+
+            Handles both calling conventions:
+              - rotary_emb(x, seqlen_offset=0, max_seqlen=None)   [single tensor]
+              - rotary_emb(q, kv, seqlen_offset=0, max_seqlen=...) [packed q,kv]
 
             Args:
-                x: Input tensor or tuple (q, kv) already prepared.
-                   If qkv packed, x is a tuple.
-                seqlen_offset: Offset for position ids (for context parallelism).
+                x: Query tensor or first positional arg.
+                *args: If provided, args[0] is kv tensor (packed call).
+                seqlen_offset: Offset for position ids (default 0).
                 max_seqlen: Maximum sequence length (unused, kept for API compat).
 
             Returns:
-                Tensor with rotary embeddings applied.
+                Tensor(s) with rotary embeddings applied.
             """
-            # Handle both packed (tuple) and unpacked (single tensor) calls
-            if isinstance(x, tuple):
-                q, kv = x
+            seqlen_offset = kwargs.get('seqlen_offset', 0)
+            max_seqlen = kwargs.get('max_seqlen', None)
+
+            if args:
+                # Called as rotary_emb(q, kv, seqlen_offset=..., max_seqlen=...)
+                q, kv = x, args[0]
                 seq_length = q.shape[1]
                 # Compute rotary embeddings
                 freqs = super().forward(seq_length=seq_length, position_offset=seqlen_offset)
                 # Apply to q
                 q = self.apply_rotary_pos_emb(q, freqs, seq_length=seq_length)
-                # Apply to kv
-                kv_shape = kv.shape
+                # Apply to kv: kv shape [batch, seq, 2, n_kv_heads, head_dim]
                 k = kv[..., 0, :, :]  # [batch, seq, n_kv_heads, head_dim]
                 v = kv[..., 1, :, :]  # [batch, seq, n_kv_heads, head_dim]
                 k = self.apply_rotary_pos_emb(k, freqs, seq_length=seq_length)
