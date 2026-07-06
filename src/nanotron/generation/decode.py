@@ -292,13 +292,12 @@ def decode_text(
                     new_decoder_states.append(state)
                     # Get the new logits
                     if generation_config.use_cache:
-                        raise NotImplementedError("Use-cache is not supported for now")
                         with attach_store(model=model, store=state.store):
-                            position_ids = get_position_ids(state.new_input_ids, tokenizer)
                             sharded_logits = model(
                                 input_ids=state.new_input_ids,
-                                position_ids=position_ids,  # [batch_size, seq_len]
+                                input_mask=state.new_input_mask,
                             )
+                        cur_mask = state.new_input_mask
                     else:
                         if isinstance(state.new_input_ids, torch.Tensor):
                             batch_generated_ids = torch.cat(state.generation_ids, dim=-1)
@@ -306,13 +305,13 @@ def decode_text(
                         else:
                             batch_generated_ids = state.new_input_ids
                             batch_generated_mask = state.new_input_mask
-                        position_ids = get_position_ids(batch_generated_ids, tokenizer)
                         sharded_logits = model(
                             input_ids=batch_generated_ids,
-                            position_ids=position_ids,  # [batch_size, seq_len]
+                            input_mask=batch_generated_mask,
                         )  # [batch_size*seq_len, vocab_size]
+                        cur_mask = batch_generated_mask
 
-                    sharded_logits = sharded_logits.view(*position_ids.shape, -1)  # [batch_size, seq_len, vocab_size]
+                    sharded_logits = sharded_logits.view(*cur_mask.shape, -1)  # [batch_size, seq_len, vocab_size]
                     if isinstance(sharded_logits, torch.Tensor) and not logits_are_batch_first:
                         sharded_logits = sharded_logits.transpose(0, 1)
                     # Communicate
@@ -616,10 +615,9 @@ def decode_tokenized(
                     new_decoder_states.append(state)
                     # Get the new logits
                     with attach_store(model=model, store=state.store):
-                        position_ids = get_position_ids(state.new_input_ids, tokenizer)
                         sharded_logits = model(
                             input_ids=state.new_input_ids,
-                            position_ids=position_ids,  # [batch_size, seq_len]
+                            input_mask=state.new_input_mask,
                         )
                         if isinstance(sharded_logits, torch.Tensor):
                             sharded_logits = sharded_logits.transpose(0, 1)
