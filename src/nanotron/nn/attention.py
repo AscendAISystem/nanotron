@@ -23,6 +23,12 @@ def get_llama3_flash_attn_varlen_qkvpacked_func():
 # Replace direct import with a function for lazy loading
 def get_ring_flash_attn_cuda():
     """Lazily import ring_flash_attn_cuda to avoid early Triton dependency."""
+    if is_npu_available():
+        raise RuntimeError(
+            "ring_flash_attn_cuda requires Triton and flash_attn, "
+            "which are not available on NPU. "
+            "Use 'sdpa' or 'flash_attention_2' instead."
+        )
     from nanotron.nn.ring_attention_lucidrain import ring_flash_attn_cuda
 
     return ring_flash_attn_cuda
