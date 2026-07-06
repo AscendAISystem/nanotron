@@ -2,10 +2,7 @@ from typing import Optional, Tuple, TypedDict, Union
 
 import torch
 import torch.nn.functional as F
-try:
-    import transformer_engine as te  # noqa: F401
-except ImportError:
-    te = None
+import transformer_engine as te  # noqa
 from torch import nn
 
 from nanotron.fp8.constants import INITIAL_AMAX, INITIAL_SCALING_FACTOR

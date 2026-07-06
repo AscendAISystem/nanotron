@@ -1,12 +1,6 @@
 import torch
-try:
-    import transformer_engine as te  # noqa: F401
-    import transformer_engine_extensions as tex
-    _TE_AVAILABLE = True
-except ImportError:
-    te = None
-    tex = None
-    _TE_AVAILABLE = False
+import transformer_engine as te  # noqa
+import transformer_engine_extensions as tex
 
 from nanotron.fp8.constants import DTYPE_TO_FP8_MAX, FP8_DTYPES, INITIAL_SCALING_FACTOR
 from nanotron.fp8.dtypes import DTypes
@@ -42,11 +36,9 @@ class FP8Tensor(torch.Tensor):
         return f"FP8Tensor({self}, fp8_meta={self.fp8_meta})"
 
 
-def convert_torch_dtype_to_te_dtype(dtype: torch.dtype):
+def convert_torch_dtype_to_te_dtype(dtype: torch.dtype) -> tex.DType:
     # NOTE: transformer engine maintains it own dtype mapping
     # so we need to manually map torch dtypes to TE dtypes
-    if not _TE_AVAILABLE:
-        raise ImportError("transformer_engine is not available. FP8 operations require CUDA and transformer_engine.")
     TORCH_DTYPE_TE_DTYPE_NAME_MAPPING = {
         torch.int32: "kInt32",
         torch.float32: "kFloat32",
