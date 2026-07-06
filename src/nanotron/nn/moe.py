@@ -17,15 +17,119 @@ logger = logging.get_logger(__name__)
 
 
 def _get_grouped_gemm_ops():
-    """Lazy import of grouped_gemm.ops — only resolved when MoE is actually used."""
+    """Lazy import of grouped_gemm.ops — only resolved when MoE is actually used.
+    Falls back to pure PyTorch implementation on NPU where CUDA-based grouped_gemm
+    is not available."""
     try:
         import grouped_gemm.ops as _ops
 
         return _ops
-    except ImportError as e:
-        raise RuntimeError(
-            "Grouped GEMM is not available. Please run `pip install --no-build-isolation git+https://github.com/fanshiqing/grouped_gemm@main` (takes less than 5 minutes)"
-        ) from e
+    except ImportError:
+        # Pure PyTorch fallback for NPU (grouped_gemm requires CUDA)
+        return _NPUGroupedGemmOps
+
+
+class _NPUGroupedGemmOps:
+    """Pure PyTorch fallback for grouped_gemm operations used by MoE on NPU.
+    
+    Provides permute/gmm/unpermute methods with the same interface as grouped_gemm.ops.
+    """
+
+    @staticmethod
+    def permute(hidden_states: torch.Tensor, routing_indices: torch.Tensor):
+        """Group tokens by expert assignment.
+        
+        Args:
+            hidden_states: [n_tokens, dim]
+            routing_indices: [n_tokens, top_k] (int32 expert indices)
+        
+        Returns:
+            dispatched_inputs: [n_tokens * top_k, dim] - tokens grouped by expert
+            inverse_permute_mapping: [n_tokens * top_k] - maps output pos to flattened routing pos
+        """
+        n_tokens, top_k = routing_indices.shape
+        device = hidden_states.device
+
+        # Flatten routing indices: [n_tokens * top_k]
+        flat_indices = routing_indices.view(-1)  # expert indices
+
+        # Sort by expert (stable to maintain order within each expert)
+        sorted_indices = torch.argsort(flat_indices, stable=True)
+
+        # Build token index for each flattened position
+        token_idx = torch.arange(n_tokens, device=device).unsqueeze(1).expand(-1, top_k).reshape(-1)
+        gathered_token_idx = token_idx[sorted_indices]
+
+        # dispatched_inputs: tokens grouped by expert in sorted order
+        dispatched_inputs = hidden_states[gathered_token_idx]
+
+        # inverse_permute_mapping: maps sorted position -> original flattened position
+        inverse_permute_mapping = torch.empty(n_tokens * top_k, dtype=torch.long, device=device)
+        inverse_permute_mapping[sorted_indices] = torch.arange(n_tokens * top_k, device=device)
+
+        return dispatched_inputs, inverse_permute_mapping
+
+    @staticmethod
+    def gmm(inputs: torch.Tensor, weights: torch.Tensor, batch_sizes: torch.Tensor, trans_b: bool = False):
+        """Grouped matrix multiplication using per-expert loops.
+        
+        Args:
+            inputs: [total_tokens, in_features] (contiguous blocks per expert)
+            weights: [num_experts, ...] 
+            batch_sizes: [num_experts] token counts per expert (on CPU)
+            trans_b: whether to transpose second dim of weights
+        
+        Returns:
+            output: [total_tokens, out_features]
+        """
+        num_experts = weights.shape[0]
+        outputs = []
+        offset = 0
+        for expert_id in range(num_experts):
+            n = int(batch_sizes[expert_id].item())
+            if n == 0:
+                continue
+            expert_input = inputs[offset:offset + n]
+            expert_weight = weights[expert_id]
+            if trans_b:
+                expert_output = torch.matmul(expert_input, expert_weight.t())
+            else:
+                expert_output = torch.matmul(expert_input, expert_weight)
+            outputs.append(expert_output)
+            offset += n
+
+        if len(outputs) == 0:
+            return inputs.new_zeros(0, weights.shape[-1])
+        return torch.cat(outputs, dim=0)
+
+    @staticmethod
+    def unpermute(outputs: torch.Tensor, inverse_permute_mapping: torch.Tensor, routing_weights: torch.Tensor):
+        """Reverse the permute operation: scatter weighted outputs back to original positions.
+        
+        Args:
+            outputs: [total_expert_tokens, dim] - expert outputs grouped by expert
+            inverse_permute_mapping: [total_expert_tokens] - maps output pos -> flattened routing pos
+            routing_weights: [n_tokens, top_k] - routing weights
+        
+        Returns:
+            combined: [n_tokens, dim]
+        """
+        n_tokens, top_k = routing_weights.shape
+        dim = outputs.shape[-1]
+        device = outputs.device
+
+        # Unsort back to original flattened order: [n_tokens * top_k, dim]
+        flat_outputs = torch.zeros(n_tokens * top_k, dim, dtype=outputs.dtype, device=device)
+        flat_outputs[inverse_permute_mapping] = outputs
+
+        # Apply routing weights and reshape
+        flat_outputs = flat_outputs.view(n_tokens, top_k, dim)
+        weights = routing_weights.unsqueeze(-1)  # [n_tokens, top_k, 1]
+
+        # Weighted sum over top_k for each token
+        combined = (flat_outputs * weights).sum(dim=1)
+
+        return combined
 
 
 ops = None  # placeholder, resolved lazily via _get_grouped_gemm_ops()
