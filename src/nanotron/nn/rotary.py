@@ -271,3 +271,37 @@ else:
         def _update_cos_sin_cache(self, seqlen, device=None, dtype=None):
             """No-op: RotaryEmbedding(base class) computes cos/sin in forward()."""
             pass
+
+        def forward(self, x, seqlen_offset=0, max_seqlen=None):
+            """Flash-attn compatible forward: apply rotary embedding to `x`.
+
+            Args:
+                x: Input tensor or tuple (q, kv) already prepared.
+                   If qkv packed, x is a tuple.
+                seqlen_offset: Offset for position ids (for context parallelism).
+                max_seqlen: Maximum sequence length (unused, kept for API compat).
+
+            Returns:
+                Tensor with rotary embeddings applied.
+            """
+            # Handle both packed (tuple) and unpacked (single tensor) calls
+            if isinstance(x, tuple):
+                q, kv = x
+                seq_length = q.shape[1]
+                # Compute rotary embeddings
+                freqs = super().forward(seq_length=seq_length, position_offset=seqlen_offset)
+                # Apply to q
+                q = self.apply_rotary_pos_emb(q, freqs, seq_length=seq_length)
+                # Apply to kv
+                kv_shape = kv.shape
+                k = kv[..., 0, :, :]  # [batch, seq, n_kv_heads, head_dim]
+                v = kv[..., 1, :, :]  # [batch, seq, n_kv_heads, head_dim]
+                k = self.apply_rotary_pos_emb(k, freqs, seq_length=seq_length)
+                # Re-pack kv
+                kv = torch.stack([k, v], dim=2)
+                return q, kv
+            else:
+                # Single tensor (inference path)
+                seq_length = x.shape[1] if x.dim() >= 3 else x.shape[0]
+                freqs = super().forward(seq_length=seq_length, position_offset=seqlen_offset)
+                return self.apply_rotary_pos_emb(x, freqs, seq_length=seq_length)
