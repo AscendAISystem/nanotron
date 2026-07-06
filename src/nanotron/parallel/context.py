@@ -5,8 +5,9 @@ import numpy as np
 import torch
 
 import nanotron.distributed as dist
+from nanotron.npu_utils import is_npu_available
 
-DistributedBackend = Literal["gloo", "mpi", "nccl"]
+DistributedBackend = Literal["gloo", "mpi", "nccl", "hccl"]
 
 
 class ParallelContext:
@@ -42,7 +43,7 @@ class ParallelContext:
 
         self.set_device()
 
-        assert backend == "nccl", "Only nccl backend is supported for now."
+        assert backend in ["nccl", "hccl"], f"Only nccl/hccl backends are supported for now, got {backend}."
 
         if not dist.is_initialized():
             dist.initialize_torch_distributed()
@@ -143,10 +144,15 @@ class ParallelContext:
         local_rank = int(os.getenv("LOCAL_RANK", "0"))
 
         # NOTE: Set the device id.
-        # `torch.cuda.device_count` should return the number of device on a single node.
         # We assume the nodes to be homogeneous (same number of gpus per node)
         device_id = local_rank
-        torch.cuda.set_device(torch.cuda.device(device_id))
+        if is_npu_available():
+            import torch_npu  # noqa: F401
+
+            torch.npu.set_device(device_id)
+        elif torch.cuda.is_available():
+            torch.cuda.set_device(torch.cuda.device(device_id))
+        # else: CPU — no device to set
 
     def get_local_ranks(self, world_rank: int) -> Dict[str, int]:
         # return tuple(i.item() for i in np.where(self.world_rank_matrix == world_rank))

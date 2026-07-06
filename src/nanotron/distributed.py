@@ -9,6 +9,7 @@ from torch import distributed as dist
 from torch.distributed import *  # noqa
 from torch.distributed.distributed_c10d import ProcessGroup
 
+from nanotron.npu_utils import is_npu_available
 from nanotron.utils import find_free_port
 
 torch_version_above_1_13 = version.parse(torch.__version__) >= version.parse("1.13.0")
@@ -252,7 +253,16 @@ def initialize_torch_distributed():
     world_size = int(os.getenv("WORLD_SIZE", "1"))
     local_rank = int(os.getenv("LOCAL_RANK", "0"))
 
-    if torch.cuda.is_available():
+    if is_npu_available():
+        # Set the device id for NPU (Ascend).
+        # `torch.npu.device_count` should return the number of device on a single node.
+        # We assume the nodes to be homogeneous (same number of gpus per node)
+        device_id = local_rank
+        import torch_npu  # noqa: F401
+
+        torch.npu.set_device(device_id)
+        backend = "hccl"
+    elif torch.cuda.is_available():
         # Set the device id.
         # `torch.cuda.device_count` should return the number of device on a single node.
         # We assume the nodes to be homogeneous (same number of gpus per node)
@@ -260,8 +270,7 @@ def initialize_torch_distributed():
         torch.cuda.set_device(torch.cuda.device(device_id))
         backend = "nccl"
     else:
-        # TODO @thomasw21: Maybe figure out a way to do distributed `cpu` training at some point
-        raise NotImplementedError(f"CUDA was not found: torch.cuda.is_available(): {torch.cuda.is_available()}")
+        # Fallback to gloo for CPU-only distributed training
         backend = "gloo"
 
     # Call the init process.
