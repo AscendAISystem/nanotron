@@ -311,8 +311,11 @@ class Qwen2Attention(LogMixin, nn.Module):
             v = kv[:, 1, :, :]  # [batch_size * seq_length, num_kv_heads, head_dim]
 
             # Reshape to [batch, seq, num_heads, head_dim] for SDPA
-            batch_size = cu_seqlens.shape[0] - 1 if cu_seqlens.dim() == 1 else 1
             seq_len = max_seqlen
+            # Compute batch_size from data tensor rather than cu_seqlens, because
+            # in the training (non-packed) path cu_seqlens may have unexpected structure
+            # (e.g. multiple zeros from CP-global position_ids).
+            batch_size = q_2d.shape[0] // seq_len
 
             if seq_len is None:
                 seq_len = q_2d.shape[0] // batch_size
