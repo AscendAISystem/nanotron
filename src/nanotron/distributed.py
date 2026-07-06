@@ -1,7 +1,7 @@
 import datetime
 import os
 from functools import cache, lru_cache
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 from packaging import version
@@ -163,6 +163,8 @@ def all_gather_coalesced(  # pylint: disable=function-redefined
     `torch` has a deprecated version of this method that doesn't work over NCCL.
     All gathers a list of tensors to all processes in a group.
 
+    Supports mixed-dtype tensors by grouping them by dtype internally.
+
     Args:
         output_tensor_lists (list[list[Tensor]]): Output tensor.
         input_tensor_list (list[Tensor]): List of tensors to all_gather from.
@@ -178,49 +180,102 @@ def all_gather_coalesced(  # pylint: disable=function-redefined
     assert len(output_tensor_lists) > 0
     assert len(input_tensor_list) == len(output_tensor_lists)
     device = input_tensor_list[0].device
-    dtype = input_tensor_list[0].dtype
     group_size = len(output_tensor_lists[0])
 
     assert (
         group_size > 1
     ), "You should probably not call `all_gather_coalesced` with a single rank, as it copies data over"
 
-    for input_tensor in input_tensor_list:
-        assert device == input_tensor.device
-        assert dtype == input_tensor.dtype
+    # Group by dtype to handle mixed-dtype tensors (e.g., bfloat16 + float32 params)
+    dtype_groups: Dict[torch.dtype, Dict] = {}
+    for idx, input_tensor in enumerate(input_tensor_list):
+        dt = input_tensor.dtype
+        if dt not in dtype_groups:
+            dtype_groups[dt] = {"input_idxs": [], "device": input_tensor.device}
+        assert device == input_tensor.device, f"Device mismatch: {device} vs {input_tensor.device}"
+        dtype_groups[dt]["input_idxs"].append(idx)
 
-    for output_tensor_list in output_tensor_lists:
-        assert len(output_tensor_list) == group_size
-        for output_tensor in output_tensor_list:
-            assert device == output_tensor.device
-            assert dtype == output_tensor.dtype
+    # If all same dtype, use the original fast path
+    if len(dtype_groups) == 1:
+        dt = input_tensor_list[0].dtype
+        for output_tensor_list in output_tensor_lists:
+            assert len(output_tensor_list) == group_size
+            for output_tensor in output_tensor_list:
+                assert device == output_tensor.device
+                assert dt == output_tensor.dtype
 
-    # Invert from `[param_idx][group_rank]` to `[group_rank][param_idx]`
-    output_tensor_lists = [
-        [output_tensor_list[group_rank] for output_tensor_list in output_tensor_lists]
-        for group_rank in range(group_size)
-    ]
+        # Invert from `[param_idx][group_rank]` to `[group_rank][param_idx]`
+        transposed = [
+            [output_tensor_list[group_rank] for output_tensor_list in output_tensor_lists]
+            for group_rank in range(group_size)
+        ]
 
-    input_tensor_buffer = torch._utils._flatten_dense_tensors(input_tensor_list)
-    output_tensor_buffer_list = [
-        torch._utils._flatten_dense_tensors(output_tensor_list) for output_tensor_list in output_tensor_lists
-    ]
+        input_tensor_buffer = torch._utils._flatten_dense_tensors(input_tensor_list)
+        output_tensor_buffer_list = [
+            torch._utils._flatten_dense_tensors(output_tensor_list) for output_tensor_list in transposed
+        ]
 
-    work = dist.all_gather(output_tensor_buffer_list, input_tensor_buffer, group=group, async_op=async_op)
+        work = dist.all_gather(output_tensor_buffer_list, input_tensor_buffer, group=group, async_op=async_op)
 
-    def update_output():
-        for original_buffer_list, gathered_buffer_tensor in zip(output_tensor_lists, output_tensor_buffer_list):
-            for original_buffer, gathered_buffer in zip(
-                original_buffer_list,
-                torch._utils._unflatten_dense_tensors(gathered_buffer_tensor, original_buffer_list),
-            ):
-                original_buffer.copy_(gathered_buffer)
+        def update_output():
+            for original_buffer_list, gathered_buffer_tensor in zip(transposed, output_tensor_buffer_list):
+                for original_buffer, gathered_buffer in zip(
+                    original_buffer_list,
+                    torch._utils._unflatten_dense_tensors(gathered_buffer_tensor, original_buffer_list),
+                ):
+                    original_buffer.copy_(gathered_buffer)
 
-    if async_op is True:
-        return work.get_future().then(lambda fut: update_output())
-    else:
-        # No need to run `work.wait()` since `dist.reduce_scatter` already waits
-        update_output()
+        if async_op is True:
+            return work.get_future().then(lambda fut: update_output())
+        else:
+            update_output()
+            return None
+
+    # Mixed dtypes: process each dtype group separately
+    futures = []
+    for dt, group_info in dtype_groups.items():
+        idxs = group_info["input_idxs"]
+        group_input = [input_tensor_list[i] for i in idxs]
+        group_output = [output_tensor_lists[i] for i in idxs]
+
+        for output_tensor_list in group_output:
+            assert len(output_tensor_list) == group_size
+            for output_tensor in output_tensor_list:
+                assert device == output_tensor.device
+                assert dt == output_tensor.dtype
+
+        # Invert
+        transposed = [
+            [output_tensor_list[group_rank] for output_tensor_list in group_output]
+            for group_rank in range(group_size)
+        ]
+
+        input_buffer = torch._utils._flatten_dense_tensors(group_input)
+        output_buffer_list = [
+            torch._utils._flatten_dense_tensors(tlist) for tlist in transposed
+        ]
+
+        work = dist.all_gather(output_buffer_list, input_buffer, group=group, async_op=async_op)
+
+        def _make_updater(transposed_tlists, output_buf_list):
+            def update_output():
+                for orig_list, gathered_buf in zip(transposed_tlists, output_buf_list):
+                    for orig, gathered in zip(
+                        orig_list,
+                        torch._utils._unflatten_dense_tensors(gathered_buf, orig_list),
+                    ):
+                        orig.copy_(gathered)
+            return update_output
+
+        if async_op:
+            futures.append(work.get_future().then(lambda fut: _make_updater(transposed, output_buffer_list)()))
+        else:
+            _make_updater(transposed, output_buffer_list)()
+
+    if async_op:
+        # Return the last future (primary will still wait for all)
+        return futures[-1] if futures else None
+    return None
 
 
 # This cache has a speedup of 4 tflops on a 7b model
