@@ -281,10 +281,37 @@ ALL_ATTENTION_FUNCTIONS = {
     "flash_attention_2": _flash_attn_impl,
     "flex_attention": flex_attention_forward,
     "sdpa": sdpa_attention_forward,
-    "ring_flash_triton": lambda *args, **kwargs: get_ring_flash_attn_cuda()(*args, **kwargs),
-    "ring": lambda *args, **kwargs: get_ring_flash_attn_varlen_func()(*args, **kwargs),
-    "llama3_ring_attention": lambda *args, **kwargs: get_llama3_flash_attn_varlen_qkvpacked_func()(*args, **kwargs),
 }
+# Register ring/triton attention with try/except guards for NPU compatibility
+for _key, _getter, _name in [
+    ("ring_flash_triton", get_ring_flash_attn_cuda, "ring_flash_attn_cuda"),
+    ("ring", get_ring_flash_attn_varlen_func, "ring_flash_attn_varlen_func"),
+    ("llama3_ring_attention", get_llama3_flash_attn_varlen_qkvpacked_func, "llama3_flash_attn_varlen_qkvpacked_func"),
+]:
+    try:
+        # Resolve to verify import works
+        _getter()
+        ALL_ATTENTION_FUNCTIONS[_key] = lambda *a, g=_getter, **kw: g()(*a, **kw)
+    except Exception:
+        if is_npu_available():
+            # NPU: register with clear error message
+            def _make_npu_fallback(n=_name):
+                def _fn(*a, **kw):
+                    raise RuntimeError(
+                        f"'{n}' requires Triton and flash_attn which are not available on NPU. "
+                        "Use 'sdpa' or 'flash_attention_2' instead."
+                    )
+                return _fn
+            ALL_ATTENTION_FUNCTIONS[_key] = _make_npu_fallback()
+        else:
+            # CUDA/CPU: re-register but return a helpful error
+            def _make_import_error_fallback(n=_name):
+                def _fn(*a, **kw):
+                    raise RuntimeError(
+                        f"Failed to load '{n}'. Ensure flash_attn and triton are installed."
+                    )
+                return _fn
+            ALL_ATTENTION_FUNCTIONS[_key] = _make_import_error_fallback()
 
 AttentionImplementation = Literal[tuple(ALL_ATTENTION_FUNCTIONS.keys())]
 

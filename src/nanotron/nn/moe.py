@@ -16,12 +16,19 @@ from nanotron.nn.activations import ACT2FN
 logger = logging.get_logger(__name__)
 
 
-try:
-    import grouped_gemm.ops as ops
-except ImportError:
-    raise RuntimeError(
-        "Grouped GEMM is not available. Please run `pip install --no-build-isolation git+https://github.com/fanshiqing/grouped_gemm@main` (takes less than 5 minutes)"
-    )
+def _get_grouped_gemm_ops():
+    """Lazy import of grouped_gemm.ops — only resolved when MoE is actually used."""
+    try:
+        import grouped_gemm.ops as _ops
+
+        return _ops
+    except ImportError as e:
+        raise RuntimeError(
+            "Grouped GEMM is not available. Please run `pip install --no-build-isolation git+https://github.com/fanshiqing/grouped_gemm@main` (takes less than 5 minutes)"
+        ) from e
+
+
+ops = None  # placeholder, resolved lazily via _get_grouped_gemm_ops()
 
 
 class Router(nn.Module):
@@ -92,10 +99,10 @@ class GroupedMLP(nn.Module):
         """
         # NOTE: ops.gemm requires "batch_sizes" (aka: num_tokens_per_expert here) to be on cpu
         num_tokens_per_expert = num_tokens_per_expert.to("cpu")
-        merged_states = ops.gmm(hidden_states, self.merged_gate_up_proj, num_tokens_per_expert, trans_b=False)
+        merged_states = _get_grouped_gemm_ops().gmm(hidden_states, self.merged_gate_up_proj, num_tokens_per_expert, trans_b=False)
         gate_states, up_states = torch.split(merged_states, merged_states.shape[-1] // 2, dim=-1)
         hidden_states = self.act(gate_states) * up_states
-        hidden_states = ops.gmm(hidden_states, self.merged_down_proj, num_tokens_per_expert, trans_b=False)
+        hidden_states = _get_grouped_gemm_ops().gmm(hidden_states, self.merged_down_proj, num_tokens_per_expert, trans_b=False)
 
         return {"hidden_states": hidden_states}
 
@@ -165,14 +172,14 @@ class Qwen2MoELayer(nn.Module):
         num_tokens_per_expert = torch.bincount(
             routing_indices.flatten(), minlength=self.num_local_experts
         )  # [num_local_experts]
-        dispatched_inputs, inverse_permute_mapping = ops.permute(hidden_states, routing_indices)
+        dispatched_inputs, inverse_permute_mapping = _get_grouped_gemm_ops().permute(hidden_states, routing_indices)
         return dispatched_inputs, inverse_permute_mapping, num_tokens_per_expert
 
     def _combine_expert_outputs(self, expert_outputs, inverse_mapping, routing_weights):
         """
         Combines outputs from different experts back to the original tensor layout.
         """
-        hidden_states = ops.unpermute(expert_outputs, inverse_mapping, routing_weights)
+        hidden_states = _get_grouped_gemm_ops().unpermute(expert_outputs, inverse_mapping, routing_weights)
         return hidden_states
 
     def _core_forward(self, hidden_states):
