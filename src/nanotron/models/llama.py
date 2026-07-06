@@ -138,7 +138,7 @@ class LlamaRotaryEmbedding(nn.Module):
             self.theta ** (torch.arange(0, self.dim, 2, dtype=torch.float, device="cpu") / self.dim)
         )  # important to compute on CPU
         self.register_buffer(
-            "inv_freq", torch.empty(self.dim // 2, dtype=torch.float, device="cuda"), persistent=False
+            "inv_freq", torch.empty(self.dim // 2, dtype=torch.float, device=get_current_device()), persistent=False
         )
         self.inv_freq = self.inv_freq.to(
             torch.float

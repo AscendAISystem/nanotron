@@ -1268,7 +1268,7 @@ class GPTModel(nn.Module):
         super().__init__()
 
         # Declare all the nodes
-        self.p2p = P2P(parallel_context.pp_pg, device=torch.device("cuda"))
+        self.p2p = P2P(parallel_context.pp_pg, device=get_current_device())
         self.random_states = random_states
         self.tp_mode = parallel_config.tp_mode if parallel_config is not None else TensorParallelLinearMode.ALL_REDUCE
 

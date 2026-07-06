@@ -17,6 +17,7 @@ from nanotron.optim.zero import (
     get_sliced_tensor,
     merge_dp_shard_in_zero1_optimizer,
 )
+from nanotron.npu_utils import get_device_handle
 from nanotron.parallel import ParallelContext
 from nanotron.parallel.parameters import NanotronParameter
 from nanotron.serialize.metadata import TensorMetadata
@@ -140,9 +141,9 @@ def state_dict_to_device(state_dict: Dict, device: str) -> Dict:
             optim_state[name] = tensor.to(device)
 
     assert (
-        state_dict["state"][0]["exp_avg"].device.type == "cuda"
-    ), "Optimizer states should be on GPU because model is on GPU"
-    torch.cuda.empty_cache()
+        state_dict["state"][0]["exp_avg"].device.type in ["cuda", "npu"]
+    ), "Optimizer states should be on GPU because model is on GPU or NPU"
+    get_device_handle().empty_cache()
 
 
 @torch.no_grad()

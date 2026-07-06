@@ -249,7 +249,7 @@ def ignore_init_on_device_and_dtype():
 
     Example:
     ```python
-    with init_on_device_and_dtype(device=torch.device("cuda"), dtype=torch.float32):
+    with init_on_device_and_dtype(device=get_current_device(), dtype=torch.float32):
         with ignore_init_on_device_and_dtype():
             # This parameter will keep its specified dtype (float32)
             self.weight = nn.Parameter(torch.randn(..., dtype=torch.float32))
