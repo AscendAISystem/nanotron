@@ -4,9 +4,24 @@ from typing import Any, List, Optional, Union
 
 from nanotron.config.utils_config import InitScalingMethod
 from nanotron.nn.attention import ALL_ATTENTION_FUNCTIONS, AttentionImplementation
+from nanotron.npu_utils import is_npu_available
 
-# The default attention implementation to use
+# The default attention implementation to use (CUDA / CPU default)
 DEFAULT_ATTENTION_IMPLEMENTATION = "flash_attention_2"
+
+
+def get_default_attention_implementation() -> str:
+    """Return device-aware default attention implementation.
+
+    On NPU, defaults to 'sdpa' (torch-native SDPA, which works on NPU without flash_attn).
+    On CUDA / CPU, defaults to 'flash_attention_2' (original behaviour, unchanged).
+
+    Returns:
+        str: One of the keys in ``ALL_ATTENTION_FUNCTIONS``.
+    """
+    if is_npu_available():
+        return "sdpa"
+    return DEFAULT_ATTENTION_IMPLEMENTATION
 
 
 @dataclass
@@ -88,7 +103,7 @@ class LlamaConfig:
     tie_word_embeddings: bool = False
     use_cache: bool = True
     vocab_size: int = 32000
-    _attn_implementation: Optional[AttentionImplementation] = DEFAULT_ATTENTION_IMPLEMENTATION
+    _attn_implementation: Optional[AttentionImplementation] = None
     z_loss_enabled: bool = False  # Z-loss regularization https://www.jmlr.org/papers/volume24/22-1144/22-1144.pdf
     z_loss_coefficient: float = 0.0001  # Default from the paper (10^-4)
 
@@ -101,6 +116,10 @@ class LlamaConfig:
         # for backward compatibility
         if self.num_key_value_heads is None:
             self.num_key_value_heads = self.num_attention_heads
+
+        # Device-aware default attention implementation
+        if self._attn_implementation is None:
+            self._attn_implementation = get_default_attention_implementation()
 
         # Validate that the attention implementation is valid
         if self._attn_implementation is not None:
@@ -141,7 +160,7 @@ class Qwen2Config:
     tie_word_embeddings: bool = False
     use_cache: bool = True
     vocab_size: int = 32000
-    _attn_implementation: Optional[AttentionImplementation] = DEFAULT_ATTENTION_IMPLEMENTATION
+    _attn_implementation: Optional[AttentionImplementation] = None
     flex_attention_mask: Optional[str] = None
     attention_bias: bool = False
     sliding_window_size: Optional[int] = None
@@ -174,6 +193,10 @@ class Qwen2Config:
         # By default i want all layers to be MoE layers
         if self.moe_config and self.moe_config.layers == [-1]:
             self.moe_config.layers = list(range(self.num_hidden_layers))
+
+        # Device-aware default attention implementation
+        if self._attn_implementation is None:
+            self._attn_implementation = get_default_attention_implementation()
 
         # Validate that the attention implementation is valid
         if self._attn_implementation is not None:
@@ -249,7 +272,7 @@ class Starcoder2Config:
     use_position_embeddings: bool = False  # TODO @nouamane this is not used
     use_rotary_embeddings: bool = True
     vocab_size: int = 49280
-    _attn_implementation: Optional[AttentionImplementation] = DEFAULT_ATTENTION_IMPLEMENTATION
+    _attn_implementation: Optional[AttentionImplementation] = None
 
     def __post_init__(self):
         if self.global_attn_layers is None:
@@ -261,6 +284,10 @@ class Starcoder2Config:
 
         if not self.multi_query and not self.grouped_query:
             self.multi_query = True
+
+        # Device-aware default attention implementation
+        if self._attn_implementation is None:
+            self._attn_implementation = get_default_attention_implementation()
 
         # Validate that the attention implementation is valid
         if self._attn_implementation is not None:

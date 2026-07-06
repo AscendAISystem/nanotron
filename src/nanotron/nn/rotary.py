@@ -5,6 +5,7 @@ from flash_attn.layers.rotary import RotaryEmbedding as OrigFlashRotaryEmbedding
 from einops import rearrange
 from nanotron import logging
 from nanotron.logging import warn_once
+from nanotron.npu_utils import get_current_device
 logger = logging.get_logger(__name__)
 
 
@@ -27,14 +28,14 @@ class RotaryEmbedding(nn.Module):
         # Generate inverse frequency buffer directly in the constructor
         self.register_buffer(
             "freqs_cis",
-            1.0 / (base ** (torch.arange(0, dim, 2, device="cuda", dtype=torch.float) / dim)),
+            1.0 / (base ** (torch.arange(0, dim, 2, device=get_current_device(), dtype=torch.float) / dim)),
             persistent=False,
         )
         # These are caches that are recomputed during inference
         self.register_buffer("cos_values", None, persistent=False)
         self.register_buffer("sin_values", None, persistent=False)
 
-        assert self.freqs_cis.device.type == "cuda"
+        assert self.freqs_cis.device.type == get_current_device().type
 
     def forward(self, seq_length=None, position_offset=0, position_ids=None):
         """Generate rotary position embeddings.

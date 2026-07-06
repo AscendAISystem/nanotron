@@ -4,6 +4,7 @@ import torch
 
 import nanotron.distributed as dist
 from nanotron import logging
+from nanotron.npu_utils import get_current_device
 from nanotron.optim.gradient_accumulator import GradientAccumulator
 from nanotron.parallel.parameters import NanotronParameter
 
@@ -57,7 +58,7 @@ def clip_grad_norm(
                 torch.stack([torch.linalg.vector_norm(g.detach(), ord=torch.inf, dtype=torch.float) for g in grads])
             )
         else:
-            total_norm = torch.zeros([], dtype=torch.float, device=torch.device("cuda"))
+            total_norm = torch.zeros([], dtype=torch.float, device=get_current_device())
         dist.all_reduce(total_norm, group=mp_pg, op=dist.ReduceOp.MAX)
 
     else:
@@ -69,7 +70,7 @@ def clip_grad_norm(
                 dtype=torch.float,
             ).pow(norm_type)
         else:
-            total_norm = torch.zeros([], dtype=torch.float, device=torch.device("cuda"))
+            total_norm = torch.zeros([], dtype=torch.float, device=get_current_device())
         dist.all_reduce(total_norm, group=mp_pg, op=dist.ReduceOp.SUM)
         total_norm.pow_(1.0 / norm_type)
 

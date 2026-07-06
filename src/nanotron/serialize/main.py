@@ -25,6 +25,7 @@ from nanotron.serialize.optimizer import (
     save_lr_scheduler,
     save_optimizer,
 )
+from nanotron.npu_utils import get_current_device
 from nanotron.serialize.weights import save_weights
 
 """
@@ -181,7 +182,7 @@ def save(
 
             for name, tensor in optim_state.items():
                 # FIXME @thomasw21: Some data is actually on `cpu`, just for this test we most it to `cuda`
-                tensor = tensor.to("cuda")
+                tensor = tensor.to(get_current_device())
 
                 if current_rank == reference_rank:
                     reference_tensor = tensor

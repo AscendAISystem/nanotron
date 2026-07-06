@@ -27,6 +27,7 @@ from nanotron.parallel.tensor_parallel.nn import (
     TensorParallelLinearMode,
     TensorParallelRowLinear,
 )
+from nanotron.npu_utils import get_current_device
 from nanotron.random import RandomStates
 from nanotron.scaling.parametrization import SpectralMupParametrizator, StandardParametrizator
 from nanotron.logging import LogMixin
@@ -689,7 +690,7 @@ class Qwen2Model(nn.Module):
         super().__init__()
 
         # Declare all the nodes
-        self.p2p = P2P(parallel_context.pp_pg, device=torch.device("cuda"))
+        self.p2p = P2P(parallel_context.pp_pg, device=get_current_device())
         self.config = config
         self.parallel_config = parallel_config
         self.parallel_context = parallel_context

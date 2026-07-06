@@ -4,8 +4,18 @@ from typing import Literal, Optional, Tuple
 import torch
 from packaging import version
 
-from nanotron.nn.ring_attention import ring_flash_attn_varlen_func
-from nanotron.nn.llama3_ring_attention import llama3_flash_attn_varlen_qkvpacked_func
+# Lazy imports for ring/custom attention (flash_attn dependency)
+def get_ring_flash_attn_varlen_func():
+    from nanotron.nn.ring_attention import ring_flash_attn_varlen_func
+
+    return ring_flash_attn_varlen_func
+
+
+def get_llama3_flash_attn_varlen_qkvpacked_func():
+    from nanotron.nn.llama3_ring_attention import llama3_flash_attn_varlen_qkvpacked_func
+
+    return llama3_flash_attn_varlen_qkvpacked_func
+
 
 # Replace direct import with a function for lazy loading
 def get_ring_flash_attn_cuda():
@@ -216,8 +226,8 @@ ALL_ATTENTION_FUNCTIONS = {
     "flex_attention": flex_attention_forward,
     "sdpa": sdpa_attention_forward,
     "ring_flash_triton": lambda *args, **kwargs: get_ring_flash_attn_cuda()(*args, **kwargs),
-    "ring": ring_flash_attn_varlen_func,
-    "llama3_ring_attention": llama3_flash_attn_varlen_qkvpacked_func,
+    "ring": lambda *args, **kwargs: get_ring_flash_attn_varlen_func()(*args, **kwargs),
+    "llama3_ring_attention": lambda *args, **kwargs: get_llama3_flash_attn_varlen_qkvpacked_func()(*args, **kwargs),
 }
 
 AttentionImplementation = Literal[tuple(ALL_ATTENTION_FUNCTIONS.keys())]

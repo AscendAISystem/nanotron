@@ -65,7 +65,7 @@ from nanotron.models.base import check_model_has_grad
 from nanotron.models.llama import LlamaForTraining, RotaryEmbedding
 from nanotron.models.qwen import Qwen2ForTraining
 from nanotron.models.starcoder2 import Starcoder2ForTraining
-from nanotron.npu_utils import get_device_handle
+from nanotron.npu_utils import get_current_device, get_device_handle
 from nanotron.optim.clip_grads import clip_grad_norm
 from nanotron.parallel import ParallelContext
 from nanotron.parallel.data_parallel.utils import sync_gradients_across_dp
@@ -1115,8 +1115,8 @@ class DistributedTrainer:
         # count number of parameters
         num_params = sum(p.numel() for p in model.parameters())
         size_params = sum(p.numel() * p.element_size() for p in model.parameters())
-        total_params = torch.tensor(num_params, device="cuda")
-        total_size = torch.tensor(size_params, device="cuda")
+        total_params = torch.tensor(num_params, device=get_current_device())
+        total_size = torch.tensor(size_params, device=get_current_device())
         dist.all_reduce(total_params, group=parallel_context.tp_pg, async_op=False, op=dist.ReduceOp.SUM)  # TP
         dist.all_reduce(total_params, group=parallel_context.pp_pg, async_op=False, op=dist.ReduceOp.SUM)  # PP
         dist.all_reduce(total_size, group=parallel_context.tp_pg, async_op=False, op=dist.ReduceOp.SUM)

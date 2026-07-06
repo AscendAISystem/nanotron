@@ -44,6 +44,7 @@ from nanotron.parallel.tensor_parallel.nn import (
     TensorParallelLinearMode,
     TensorParallelRowLinear,
 )
+from nanotron.npu_utils import get_current_device
 from nanotron.random import RandomStates
 from nanotron.scaling.parametrization import SpectralMupParametrizator, StandardParametrizator
 from nanotron.utils import checkpoint_method
@@ -69,10 +70,10 @@ class RotaryEmbedding(nn.Module):
             return
         self.register_buffer(
             "freqs_cis",
-            torch.empty(self.end, self.dim // 2, 2, dtype=torch.float, device="cuda"),
+            torch.empty(self.end, self.dim // 2, 2, dtype=torch.float, device=get_current_device()),
             persistent=False,
         )
-        assert self.freqs_cis.device.type == "cuda"
+        assert self.freqs_cis.device.type == get_current_device().type
         # TODO @nouamane: One we figure out how to do the DTypeInvariantTensor, this can be removed and changed to an assert
         if self.freqs_cis.dtype != torch.float:
             self.freqs_cis = self.freqs_cis.to(torch.float)
@@ -80,9 +81,9 @@ class RotaryEmbedding(nn.Module):
         freqs = 1.0 / (
             self.theta ** (torch.arange(0, self.dim, 2, dtype=torch.float, device="cpu")[: (self.dim // 2)] / self.dim)
         ).to(
-            "cuda"
+            get_current_device()
         )  # should be computed on CPU, otherwise different results with Transformers.
-        t = torch.arange(self.end, device="cuda")
+        t = torch.arange(self.end, device=get_current_device())
         freqs = torch.outer(t, freqs).float()
         complex_freqs = torch.polar(torch.ones_like(freqs), freqs)
         freqs = torch.view_as_real(complex_freqs)
@@ -824,7 +825,7 @@ class LlamaModel(nn.Module):
         super().__init__()
 
         # Declare all the nodes
-        self.p2p = P2P(parallel_context.pp_pg, device=torch.device("cuda"))
+        self.p2p = P2P(parallel_context.pp_pg, device=get_current_device())
         self.config = config
         self.parallel_config = parallel_config
         self.parallel_context = parallel_context

@@ -14,6 +14,7 @@ from nanotron.logging import log_rank
 from nanotron.parallel.context import ParallelContext
 from nanotron.parallel.pipeline_parallel.block import PipelineBlock
 from nanotron.logging import LoggingCollectorMixin
+from nanotron.npu_utils import get_current_device
 if TYPE_CHECKING:
     from nanotron.config import NanotronConfigs
     from nanotron.parallel.parameters import NanotronParameter
@@ -189,9 +190,11 @@ def build_model(
     parallel_context: ParallelContext,
     dtype: torch.dtype,
     target_pp_ranks: Optional[List[int]] = None,
-    device: Optional[torch.device] = torch.device("cuda"),
+    device: Optional[torch.device] = None,
 ) -> NanotronModel:
     """Build the model and set the pp ranks for each pipeline block."""
+    if device is None:
+        device = get_current_device()
     # TODO: classes dont take same args
     log_rank(
         "Building model", logger=logger, level=logging.INFO, rank=0, group=parallel_context.world_pg, is_separator=True

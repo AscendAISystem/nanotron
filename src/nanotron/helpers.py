@@ -34,7 +34,7 @@ from nanotron.optim.named_optimizer import NamedOptimizer
 from nanotron.optim.optimizer_from_gradient_accumulator import (
     OptimizerFromGradientAccumulator,
 )
-from nanotron.npu_utils import get_device_handle
+from nanotron.npu_utils import get_current_device, get_device_handle
 from nanotron.optim.zero import ZeroDistributedOptimizer
 from nanotron.parallel import ParallelContext
 from nanotron.parallel.tensor_parallel.nn import TensorParallelLinearMode
@@ -590,7 +590,7 @@ def test_all_pair_to_pair(
             if only_node_to_node and (a % 8 != 0 or b % 8 != 0):
                 # We only check node-to-node throughput
                 continue
-            test_tensor = torch.zeros((int(throughput_size),), dtype=torch.uint8, device=torch.device("cuda"))
+            test_tensor = torch.zeros((int(throughput_size),), dtype=torch.uint8, device=get_current_device())
             for k in range(throughput_iters):
                 pre = time.perf_counter()
                 get_device_handle().synchronize()

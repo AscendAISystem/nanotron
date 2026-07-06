@@ -20,6 +20,7 @@ from nanotron.parallel.pipeline_parallel.context_manager import attach_pipeline_
 from nanotron.parallel.pipeline_parallel.p2p import P2PTensorMetaData, view_as_contiguous
 from nanotron.parallel.pipeline_parallel.state import PipelineEvalBatchState
 from nanotron.parallel.pipeline_parallel.tensor_pointer import TensorPointer
+from nanotron.npu_utils import get_current_device
 from nanotron.utils import get_untyped_storage
 
 if TYPE_CHECKING:
@@ -114,8 +115,8 @@ def micro_batcher(
                 # pad_to_multiple_of=8
             )
 
-            encodings["attention_mask"] = encodings.attention_mask.to(dtype=torch.bool, device="cuda")
-            encodings.to("cuda")
+            encodings["attention_mask"] = encodings.attention_mask.to(dtype=torch.bool, device=get_current_device())
+            encodings.to(get_current_device())
             yield GenerationInputs(input_ids=encodings.input_ids, input_masks=encodings.attention_mask)
         else:
             yield GenerationInputs(
@@ -147,8 +148,8 @@ def micro_splitter(
         #     continue
 
         if dist.get_rank(parallel_context.pp_pg) == input_rank:
-            micro_batch_mask = micro_batch_mask.to(dtype=torch.bool, device="cuda")
-            micro_batch_mask.to("cuda")
+            micro_batch_mask = micro_batch_mask.to(dtype=torch.bool, device=get_current_device())
+            micro_batch_mask.to(get_current_device())
             yield GenerationInputs(input_ids=micro_batch_ids.clone(), input_masks=micro_batch_mask.clone())
         else:
             yield GenerationInputs(
@@ -848,7 +849,7 @@ def broadcast_tensors(
             storage_offset=storage_offset,
         )
         if dist.get_rank(group) != group_src:
-            tensor = meta.create_empty_storage(device=torch.device("cuda"))
+            tensor = meta.create_empty_storage(device=get_current_device())
         else:
             tensor = view_as_contiguous(tensor)
         dist.broadcast(tensor, src=get_global_rank(group_rank=group_src, group=group), group=group)

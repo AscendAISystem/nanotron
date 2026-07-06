@@ -8,6 +8,7 @@ import torch
 
 from nanotron import distributed as dist
 from nanotron.distributed import ProcessGroup
+from nanotron.npu_utils import get_current_device
 
 
 @dataclass
@@ -140,7 +141,7 @@ def get_synced_random_state(
 
     # TODO @thomasw21: broadcast tensor using `broadcast` in order not to use pickle
     dist.broadcast_object_list(
-        random_states, src=dist.get_global_rank(pg, reference_rank), group=pg, device=torch.device("cuda")
+        random_states, src=dist.get_global_rank(pg, reference_rank), group=pg, device=get_current_device()
     )
 
     new_random_state = random_states[0]
