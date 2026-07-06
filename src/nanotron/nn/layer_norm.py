@@ -14,8 +14,8 @@ class TritonLayerNorm(nn.LayerNorm):
     def forward(
         self, input, residual=None, dropout_p=0.0, prenorm=False, residual_in_fp32=False, return_dropout_mask=False
     ):
+        # W08 NPU adaptation: downgrade flash_attn TritonLayerNorm → standard PyTorch LayerNorm
         if is_npu_available():
-            # NPU branch: fallback to standard PyTorch LayerNorm
             return nn.functional.layer_norm(
                 input, self.normalized_shape, self.weight, self.bias, self.eps
             )
@@ -52,8 +52,8 @@ class TritonRMSNorm(nn.Module):
     def forward(
         self, input, residual=None, dropout_p=0.0, prenorm=False, residual_in_fp32=False, return_dropout_mask=False
     ):
+        # W08 NPU adaptation: downgrade flash_attn TritonRMSNorm → PyTorch RMSNorm (LlamaRMSNorm equivalent)
         if is_npu_available():
-            # NPU branch: fallback to LlamaRMSNorm-equivalent computation
             input_dtype = input.dtype
             x = input.to(torch.float32)
             variance = x.pow(2).mean(-1, keepdim=True)
