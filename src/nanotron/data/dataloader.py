@@ -151,28 +151,24 @@ def dummy_infinite_data_generator(
                     )
                     prev_idx += doc_len
             while True:
+                # Generate input_ids once and use shifted version for labels
+                raw_input_ids = torch.randint(
+                    0,
+                    vocab_size,
+                    (micro_batch_size, sequence_length),
+                    dtype=torch.long,
+                    device=get_current_device(),
+                    generator=generator,
+                )[:, local_slice]
+                raw_label_ids = raw_input_ids.roll(-1, dims=1)
                 yield {
-                    "input_ids": torch.randint(
-                        0,
-                        vocab_size,
-                        (micro_batch_size, sequence_length),
-                        dtype=torch.long,
-                        device=get_current_device(),
-                        generator=generator,
-                    )[:, local_slice]
+                    "input_ids": raw_input_ids
                     if dist.get_rank(parallel_context.pp_pg) == input_pp_rank
                     else TensorPointer(group_rank=input_pp_rank),
                     "position_ids": position_ids[:, local_slice]
                     if dist.get_rank(parallel_context.pp_pg) == input_pp_rank
                     else TensorPointer(group_rank=input_pp_rank),
-                    "label_ids": torch.randint(
-                        0,
-                        vocab_size,
-                        (micro_batch_size, sequence_length),
-                        dtype=torch.long,
-                        device=get_current_device(),
-                        generator=generator,
-                    )[:, local_slice]
+                    "label_ids": raw_label_ids
                     if dist.get_rank(parallel_context.pp_pg) == output_pp_rank
                     else TensorPointer(group_rank=output_pp_rank),
                     "label_mask": torch.ones(
@@ -186,15 +182,18 @@ def dummy_infinite_data_generator(
                 }
         else:
             while True:
+                # Generate input_ids once and use shifted version for labels
+                raw_input_ids = torch.randint(
+                    0,
+                    vocab_size,
+                    (micro_batch_size, sequence_length),
+                    dtype=torch.long,
+                    device=get_current_device(),
+                    generator=generator,
+                )[:, local_slice]
+                raw_label_ids = raw_input_ids.roll(-1, dims=1)
                 yield {
-                    "input_ids": torch.randint(
-                        0,
-                        vocab_size,
-                        (micro_batch_size, sequence_length),
-                        dtype=torch.long,
-                        device=get_current_device(),
-                        generator=generator,
-                    )[:, local_slice]
+                    "input_ids": raw_input_ids
                     if dist.get_rank(parallel_context.pp_pg) == input_pp_rank
                     else TensorPointer(group_rank=input_pp_rank),
                     "input_mask": torch.ones(
@@ -205,14 +204,7 @@ def dummy_infinite_data_generator(
                     )[:, local_slice]
                     if dist.get_rank(parallel_context.pp_pg) == input_pp_rank
                     else TensorPointer(group_rank=input_pp_rank),
-                    "label_ids": torch.randint(
-                        0,
-                        vocab_size,
-                        (micro_batch_size, sequence_length),
-                        dtype=torch.long,
-                        device=get_current_device(),
-                        generator=generator,
-                    )[:, local_slice]
+                    "label_ids": raw_label_ids
                     if dist.get_rank(parallel_context.pp_pg) == output_pp_rank
                     else TensorPointer(group_rank=output_pp_rank),
                     "label_mask": torch.ones(
