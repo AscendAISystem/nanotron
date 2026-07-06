@@ -1,7 +1,6 @@
 from typing import Dict, List, Optional, Tuple, Union
 
 import torch
-from flash_attn.modules.mha import flash_attn_varlen_kvpacked_func
 from torch import nn
 from torch.utils.checkpoint import CheckpointFunction
 
@@ -284,6 +283,8 @@ class Qwen2Attention(LogMixin, nn.Module):
         max_seqlen = seq_length  # TODO: should this be max position_ids?
 
 
+        from nanotron.npu_utils import is_npu_available
+
         if self.config._attn_implementation == "llama3_ring_attention":
             attn_output = llama3_flash_attn_varlen_kvpacked_func(
                 q,
@@ -303,7 +304,35 @@ class Qwen2Attention(LogMixin, nn.Module):
                 return_attn_probs=self.log_attn_probs,
                 group=self.cp_pg,
             )  # Not contiguous, similar to flash_attn
+        elif is_npu_available():
+            # NPU branch: unpack kv and use SDPA
+            q_2d = q  # [batch_size * seq_length, num_heads, head_dim] or [total_q, num_heads, head_dim]
+            k = kv[:, 0, :, :]  # [batch_size * seq_length, num_kv_heads, head_dim]
+            v = kv[:, 1, :, :]  # [batch_size * seq_length, num_kv_heads, head_dim]
+
+            # Reshape to [batch, seq, num_heads, head_dim] for SDPA
+            batch_size = cu_seqlens.shape[0] - 1 if cu_seqlens.dim() == 1 else 1
+            seq_len = max_seqlen
+
+            if seq_len is None:
+                seq_len = q_2d.shape[0] // batch_size
+
+            q_2d = q_2d.view(batch_size, seq_len, self.local_num_heads, self.head_dim).transpose(1, 2)
+            k = k.view(batch_size, seq_len, self.local_num_kv_heads, self.head_dim).transpose(1, 2)
+            v = v.view(batch_size, seq_len, self.local_num_kv_heads, self.head_dim).transpose(1, 2)
+
+            attn_output = torch.nn.functional.scaled_dot_product_attention(
+                q_2d, k, v,
+                attn_mask=None,
+                dropout_p=0.0,
+                scale=None,
+                is_causal=True,
+                enable_gqa=q_2d.shape[1] != k.shape[1],
+            )
+            attn_output = attn_output.transpose(1, 2).contiguous().view(-1, self.local_num_heads * self.head_dim)
         else:
+            from flash_attn.modules.mha import flash_attn_varlen_kvpacked_func
+
             assert cu_seqlens.dtype == torch.int32
             assert max_seqlen is not None
             assert isinstance(max_seqlen, int)

@@ -15,6 +15,7 @@ from nanotron import distributed as dist
 from nanotron import logging
 from nanotron.config import NanosetDatasetsArgs
 from nanotron.data import DataCollatorForCLM, DataCollatorForCLMWithPositionIds, EmptyInfiniteDataset
+from nanotron.npu_utils import is_npu_available
 from nanotron.data.dataloader import get_dataloader_worker_init
 from nanotron.data.nemo_dataset import BlendableDataset
 from nanotron.data.nemo_dataset.dataset_utils import compile_helper
@@ -705,6 +706,10 @@ def get_tb_dataloader(
             output_pp_rank=output_pp_rank,
             parallel_context=parallel_context,
         )
+
+    # NPU 不支持 pin_memory，强制关闭
+    if is_npu_available():
+        dataloader_pin_memory = False
 
     return DataLoader(
         dataset,

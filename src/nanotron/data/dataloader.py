@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 from nanotron import distributed as dist
 from nanotron import logging
 from nanotron.config import Config
-from nanotron.npu_utils import get_current_device
+from nanotron.npu_utils import get_current_device, is_npu_available
 from nanotron.data.clm_collator import DataCollatorForCLM, DataCollatorForCLMWithPositionIds
 from nanotron.data.samplers import EmptyInfiniteDataset, get_sampler
 from nanotron.logging.timers import nanotron_timer
@@ -363,6 +363,10 @@ def get_train_dataloader(
         drop_last=dataloader_drop_last,
         consumed_train_samples=consumed_train_samples,
     )
+
+    # NPU 不支持 pin_memory，强制关闭
+    if is_npu_available():
+        dataloader_pin_memory = False
 
     return DataLoader(
         train_dataset,

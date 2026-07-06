@@ -7,6 +7,7 @@ from nanotron.data.dataloader import (
     DataCollatorForCLMWithPositionIds,
     get_dataloader_worker_init,
 )
+from nanotron.npu_utils import is_npu_available
 from nanotron.data.nanoset import Nanoset
 from nanotron.data.samplers import (
     EmptyInfiniteDataset,
@@ -67,6 +68,10 @@ def build_nanoset_dataloader(
         consumed_train_samples=consumed_train_samples,
         shuffle=False,
     )
+
+    # NPU 不支持 pin_memory，强制关闭
+    if is_npu_available():
+        dataloader_pin_memory = False
 
     return DataLoader(
         dataset,

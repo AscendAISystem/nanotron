@@ -4,6 +4,9 @@ from typing import Literal, Optional, Tuple
 import torch
 from packaging import version
 
+from nanotron.npu_utils import is_npu_available
+
+
 # Lazy imports for ring/custom attention (flash_attn dependency)
 def get_ring_flash_attn_varlen_func():
     from nanotron.nn.ring_attention import ring_flash_attn_varlen_func
@@ -32,7 +35,8 @@ def is_torch_flex_attn_available():
     return version.parse(torch.__version__) >= version.parse("2.5.0")
 
 
-if is_torch_flex_attn_available():
+# flex_attention requires torch>=2.5 and is not available on NPU
+if is_torch_flex_attn_available() and not is_npu_available():
     from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
 
@@ -46,7 +50,8 @@ def is_flash_attn_greater_or_equal_2_10():
         return False
 
 
-if is_flash_attn_greater_or_equal_2_10():
+# flash_attn is not available on NPU
+if not is_npu_available() and is_flash_attn_greater_or_equal_2_10():
     from flash_attn.flash_attn_interface import flash_attn_func
 # adapted from transformers.integrations.flex_attention.flex_attention_forward
 def flex_attention_forward(
@@ -173,16 +178,61 @@ def flash_attention_forward(
     else:
         window_size = (-1, -1)
 
-    attn_output = flash_attn_func(
-        q=query,
-        k=key,
-        v=value,
-        dropout_p=dropout,
-        softmax_scale=scaling,
-        causal=is_causal,
-        window_size=window_size,
-        return_attn_probs=False,
-    )
+    if is_npu_available():
+        # NPU branch: use npu_fusion_attention if available, otherwise fallback to SDPA
+        import torch_npu  # noqa: F401
+
+        try:
+            # npu_fusion_attention signature:
+            #   query, key, value, head_num, input_layout, pse, padding_mask, softmax_scale, keep_prob, pre_tockens, next_tockens, attention_mask_type, scale, sparse_mode
+            attn_output, _ = torch_npu.npu_fusion_attention(
+                query,
+                key,
+                value,
+                head_num=module.local_num_heads,
+                input_layout="BSND",
+                pse=None,
+                padding_mask=None,
+                softmax_scale=scaling,
+                keep_prob=1.0 - dropout,
+                pre_tockens=65536,
+                next_tockens=65536,
+                attention_mask_type="causal" if is_causal else "default",
+                scale=1.0,
+                sparse_mode=0,
+            )
+        except (RuntimeError, AttributeError) as e:
+            # Fallback to SDPA if npu_fusion_attention fails
+            import warnings
+            warnings.warn(f"npu_fusion_attention failed ({e}), falling back to SDPA")
+
+            # SDPA expects [b, num_heads, seq_len, head_dim]
+            q_sdpa = query.transpose(1, 2).contiguous()
+            k_sdpa = key.transpose(1, 2).contiguous()
+            v_sdpa = value.transpose(1, 2).contiguous()
+            attn_output = torch.nn.functional.scaled_dot_product_attention(
+                q_sdpa,
+                k_sdpa,
+                v_sdpa,
+                attn_mask=attention_mask,
+                dropout_p=dropout,
+                scale=scaling,
+                is_causal=is_causal,
+                enable_gqa=query.shape[2] != key.shape[2],
+            )
+            attn_output = attn_output.transpose(1, 2).contiguous()
+    else:
+        # CUDA/CPU: use flash_attn
+        attn_output = flash_attn_func(
+            q=query,
+            k=key,
+            v=value,
+            dropout_p=dropout,
+            softmax_scale=scaling,
+            causal=is_causal,
+            window_size=window_size,
+            return_attn_probs=False,
+        )
     attn_output = attn_output.contiguous()
     return attn_output, None
 
@@ -221,8 +271,14 @@ def sdpa_attention_forward(
     return attn_output, None
 
 
+# On NPU, flash_attention_2 is not available, so we fall back to SDPA
+if is_npu_available():
+    _flash_attn_impl = sdpa_attention_forward
+else:
+    _flash_attn_impl = flash_attention_forward
+
 ALL_ATTENTION_FUNCTIONS = {
-    "flash_attention_2": flash_attention_forward,
+    "flash_attention_2": _flash_attn_impl,
     "flex_attention": flex_attention_forward,
     "sdpa": sdpa_attention_forward,
     "ring_flash_triton": lambda *args, **kwargs: get_ring_flash_attn_cuda()(*args, **kwargs),
