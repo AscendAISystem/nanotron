@@ -288,6 +288,11 @@ def ring_flash_attn_varlen_func(
     ring_pg=None,
     **kwargs,
 ):
+    if is_npu_available():
+        raise RuntimeError(
+            "ring_flash_attn_varlen_func requires Triton and flash_attn, "
+            "which are not available on NPU. Use 'sdpa' or 'flash_attention_2' instead."
+        )
     assert cu_seqlens is not None
     assert max_seqlen is not None
     return (
