@@ -255,7 +255,7 @@ class CoreAttention(nn.Module):
         q_sequence_mask: torch.Tensor,  # torch.BoolTensor [batch_size, q_length] (can be broadcasted to that size)
         kv_sequence_mask: torch.Tensor,  # torch.BoolTensor [batch_size, kv_length] (can be broadcasted to that size)
     ):
-        from flash_attn.flash_attn_interface import flash_attn_varlen_func
+        from nanotron.npu_utils import is_npu_available
 
         # TODO @thomasw21: Compute once, instead of computing for each layers.
         cu_seqlens_q = torch.zeros((q_sequence_mask.shape[0] + 1), dtype=torch.int32, device=query_states.device)
@@ -266,20 +266,43 @@ class CoreAttention(nn.Module):
         # TODO(kunhao): flash attn's causal means that the query can only attend to the keys before it. This is not
         # what we want if we are using kv cache. This is a hack as we always have q_length == 1 when using kv cache.
         causal = False if q_sequence_mask.shape[1] == 1 else True
-        attn_output = flash_attn_varlen_func(
-            q=query_states,
-            k=key_states,
-            v=value_states,
-            cu_seqlens_q=cu_seqlens_q,
-            cu_seqlens_k=cu_seqlens_k,
-            max_seqlen_q=q_sequence_mask.shape[1],
-            max_seqlen_k=kv_sequence_mask.shape[1],
-            dropout_p=self.dropout if self.training else 0.0,
-            softmax_scale=None,  # defaults to 1/sqrt(d_qk)
-            causal=causal,
-            window_size=(self.sliding_window_size - 1, 0) if self.sliding_window_size is not None else (-1, -1),
-            return_attn_probs=False,
-        )
+
+        if is_npu_available():
+            # NPU branch: use SDPA
+            batch_size = q_sequence_mask.shape[0]
+            q_len = q_sequence_mask.shape[1]
+            kv_len = kv_sequence_mask.shape[1]
+            q = query_states.view(batch_size, q_len, -1, query_states.shape[-1]).transpose(1, 2)
+            k = key_states.view(batch_size, kv_len, -1, key_states.shape[-1]).transpose(1, 2)
+            v = value_states.view(batch_size, kv_len, -1, value_states.shape[-1]).transpose(1, 2)
+            attn_output = torch.nn.functional.scaled_dot_product_attention(
+                q, k, v,
+                attn_mask=None,
+                dropout_p=self.dropout if self.training else 0.0,
+                scale=None,
+                is_causal=causal,
+                enable_gqa=q.shape[1] != k.shape[1],
+            )
+            # [batch, num_heads, q_len, head_dim] -> [batch * q_len, num_heads, head_dim]
+            n_heads = attn_output.shape[1]
+            attn_output = attn_output.transpose(1, 2).contiguous().view(-1, n_heads, query_states.shape[-1])
+        else:
+            from flash_attn.flash_attn_interface import flash_attn_varlen_func
+
+            attn_output = flash_attn_varlen_func(
+                q=query_states,
+                k=key_states,
+                v=value_states,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_k,
+                max_seqlen_q=q_sequence_mask.shape[1],
+                max_seqlen_k=kv_sequence_mask.shape[1],
+                dropout_p=self.dropout if self.training else 0.0,
+                softmax_scale=None,  # defaults to 1/sqrt(d_qk)
+                causal=causal,
+                window_size=(self.sliding_window_size - 1, 0) if self.sliding_window_size is not None else (-1, -1),
+                return_attn_probs=False,
+            )
 
         return attn_output
 
@@ -681,11 +704,7 @@ class CausalSelfMQA(nn.Module, AttachableStore):
         hidden_states,  # [seq_length, batch_size, hidden_dim]
         sequence_mask,  # [batch_size, seq_length]
     ):
-        from flash_attn import bert_padding
-        from flash_attn.flash_attn_interface import (
-            flash_attn_varlen_func,
-            flash_attn_with_kvcache,
-        )
+        from nanotron.npu_utils import is_npu_available
 
         batch_size = hidden_states.shape[1]
 
@@ -761,11 +780,8 @@ class CausalSelfMQA(nn.Module, AttachableStore):
 
             if "key" not in store:
                 # First inference iteration (Prefill)
-                # TODO @nouamane: support custom masking
-                # assert that [ False, False, False, False,  True,  True,  True,  True,  True,  True] is accepted
-                # but [ False, False, False, False,  True,  True,  False,  False,  True,  True] is not (can't mask in the middle of sequence)
                 assert ~(
-                    sequence_mask[:, :-1] & (~sequence_mask[:, 1:])  # True is never followed by False
+                    sequence_mask[:, :-1] & (~sequence_mask[:, 1:])
                 ).any(), "Can't mask in the middle of sequence, please make sure that pads are at the left of the sequence if existing"
 
                 # preallocate k_cache, v_cache to self.prefill_kv_len
@@ -784,34 +800,51 @@ class CausalSelfMQA(nn.Module, AttachableStore):
                     dtype=query_states.dtype,
                     device=query_states.device,
                 )
-                # Remove pad tokens from key_states and concatenate samples in key_unpad
-                # cu_seqlens_k is the cumulative sequence lengths of key_states
-                (query_unpad, indices_q, cu_seqlens_q, max_seqlen_q) = bert_padding.unpad_input(
-                    query_states,
-                    sequence_mask,
-                )
-                (key_unpad, indices_k, cu_seqlens_k, max_seqlen_k) = bert_padding.unpad_input(
-                    key_states, sequence_mask
-                )
-                (value_unpad, _, _, _) = bert_padding.unpad_input(value_states, sequence_mask)
 
-                output_unpad = flash_attn_varlen_func(
-                    q=query_unpad,  # (total_q, n_heads, d_qk)
-                    k=key_unpad,  # (total_kv, 1, d_qk)
-                    v=value_unpad,  # (total_kv, 1, d_v)
-                    cu_seqlens_q=cu_seqlens_q,
-                    cu_seqlens_k=cu_seqlens_k,
-                    max_seqlen_q=max_seqlen_q,
-                    max_seqlen_k=max_seqlen_k,
-                    dropout_p=0.0,
-                    softmax_scale=None,
-                    causal=True,  # True in prefill phase, False in subsequent phases
-                    return_attn_probs=False,
-                )  # (total_unpadded, n_local_q_heads, d_v)
+                if is_npu_available():
+                    # NPU branch: use SDPA directly
+                    q = query_states.transpose(1, 2).contiguous()  # [batch, n_heads, q_len, d_qk]
+                    k = key_states.transpose(1, 2).contiguous()
+                    v = value_states.transpose(1, 2).contiguous()
+                    attention_output = torch.nn.functional.scaled_dot_product_attention(
+                        q, k, v,
+                        attn_mask=None,
+                        dropout_p=0.0,
+                        scale=None,
+                        is_causal=True,
+                        enable_gqa=q.shape[1] != k.shape[1],
+                    )
+                    attention_output = attention_output.transpose(1, 2).contiguous()  # [batch, q_len, 1, d_v]
+                else:
+                    from flash_attn import bert_padding
+                    from flash_attn.flash_attn_interface import flash_attn_varlen_func
 
-                attention_output = bert_padding.pad_input(
-                    output_unpad, indices_q, batch_size, q_length
-                )  # (batch_size, q_length, n_local_q_heads, d_v)
+                    (query_unpad, indices_q, cu_seqlens_q, max_seqlen_q) = bert_padding.unpad_input(
+                        query_states,
+                        sequence_mask,
+                    )
+                    (key_unpad, indices_k, cu_seqlens_k, max_seqlen_k) = bert_padding.unpad_input(
+                        key_states, sequence_mask
+                    )
+                    (value_unpad, _, _, _) = bert_padding.unpad_input(value_states, sequence_mask)
+
+                    output_unpad = flash_attn_varlen_func(
+                        q=query_unpad,
+                        k=key_unpad,
+                        v=value_unpad,
+                        cu_seqlens_q=cu_seqlens_q,
+                        cu_seqlens_k=cu_seqlens_k,
+                        max_seqlen_q=max_seqlen_q,
+                        max_seqlen_k=max_seqlen_k,
+                        dropout_p=0.0,
+                        softmax_scale=None,
+                        causal=True,
+                        return_attn_probs=False,
+                    )
+
+                    attention_output = bert_padding.pad_input(
+                        output_unpad, indices_q, batch_size, q_length
+                    )
 
                 pad_to_right(key_states, sequence_mask, new_tensor=k_cache)
                 pad_to_right(value_states, sequence_mask, new_tensor=v_cache)
@@ -822,32 +855,53 @@ class CausalSelfMQA(nn.Module, AttachableStore):
                 k_cache = store["key"]
                 v_cache = store["value"]
 
-                # [batch_size, seq_length, num_heads, d_qk]
                 query_states = query_states.view(
                     batch_size, q_length, self.n_heads, self.d_qk
-                )  # [batch_size, q_length, self.n_heads, d_qk]
-                kv_length = key_states.shape[1]
-                key_states = key_states.view(batch_size, kv_length, 1, self.d_qk)  # [batch_size, kv_length, 1, d_qk]
-                value_states = value_states.view(batch_size, kv_length, 1, self.d_v)  # [batch_size, kv_length, 1, d_v]
-
-                attention_output = flash_attn_with_kvcache(
-                    query_states,
-                    k_cache,
-                    v_cache,
-                    key_states,
-                    value_states,
-                    rotary_cos=None,
-                    rotary_sin=None,
-                    # TODO @nouamane: seems like this doesn't help to indicate padding in (for first iteration it's just 0)
-                    cache_seqlens=position_offsets.contiguous(),
-                    softmax_scale=None,
-                    causal=True,
-                    rotary_interleaved=False,  # GPT-NeoX style
                 )
+                kv_length = key_states.shape[1]
+                key_states = key_states.view(batch_size, kv_length, 1, self.d_qk)
+                value_states = value_states.view(batch_size, kv_length, 1, self.d_v)
+
+                if is_npu_available():
+                    # NPU branch: manual KV cache update + SDPA
+                    cache_seqlens = position_offsets
+                    for b in range(batch_size):
+                        offset = cache_seqlens[b].item()
+                        k_cache[b, offset:offset + kv_length] = key_states[b]
+                        v_cache[b, offset:offset + kv_length] = value_states[b]
+
+                    q = query_states.transpose(1, 2).contiguous()
+                    k = k_cache.transpose(1, 2).contiguous()
+                    v = v_cache.transpose(1, 2).contiguous()
+                    attention_output = torch.nn.functional.scaled_dot_product_attention(
+                        q, k, v,
+                        attn_mask=None,
+                        dropout_p=0.0,
+                        scale=None,
+                        is_causal=True,
+                        enable_gqa=q.shape[1] != k.shape[1],
+                    )
+                    attention_output = attention_output.transpose(1, 2).contiguous()
+                else:
+                    from flash_attn.flash_attn_interface import flash_attn_with_kvcache
+
+                    attention_output = flash_attn_with_kvcache(
+                        query_states,
+                        k_cache,
+                        v_cache,
+                        key_states,
+                        value_states,
+                        rotary_cos=None,
+                        rotary_sin=None,
+                        cache_seqlens=position_offsets.contiguous(),
+                        softmax_scale=None,
+                        causal=True,
+                        rotary_interleaved=False,
+                    )
 
             store.update(
                 {
-                    "key": k_cache,  # flash-attn has updated with new key_states using cache_seqlens
+                    "key": k_cache,
                     "value": v_cache,
                     "position_offsets": position_offsets,
                     "past_key_values_length": past_key_values_length,
@@ -865,12 +919,12 @@ class CausalSelfMQA(nn.Module, AttachableStore):
             value_states = value_states.view(batch_size * kv_length, 1, self.d_v)
 
             attention_output = self.attention(
-                query_states=query_states,  # [batch_size * q_length, num_heads, d_qk]
-                key_states=key_states,  # [batch_size * kv_length, 1, d_qk]
-                value_states=value_states,  # [batch_size * kv_length, 1, d_v]
+                query_states=query_states,
+                key_states=key_states,
+                value_states=value_states,
                 q_sequence_mask=q_sequence_mask,
                 kv_sequence_mask=kv_sequence_mask,
-            )  # [batch_size, num_heads, seq_length, d_v]
+            )
 
         output = self.o(unshape(attention_output))
 
@@ -961,11 +1015,7 @@ class CausalSelfGQA(nn.Module, AttachableStore):
         hidden_states,  # (seq_length, batch_size, hidden_size)
         sequence_mask,  # (batch_size, seq_length)
     ):
-        from flash_attn import bert_padding
-        from flash_attn.flash_attn_interface import (
-            flash_attn_varlen_func,
-            flash_attn_with_kvcache,
-        )
+        from nanotron.npu_utils import is_npu_available
 
         fused_qkv = self.query_key_value(
             hidden_states
@@ -976,21 +1026,19 @@ class CausalSelfGQA(nn.Module, AttachableStore):
         query, key, value = torch.split(qkv, [self.n_repeats, 1, 1], dim=3)
         query_states = query.transpose(0, 1).reshape(
             batch_size, q_length, self.n_local_q_heads, self.head_dim
-        )  # TODO @nouamane: can we transpose qkv instead?
+        )
         key_states = key.transpose(0, 1).reshape(batch_size, q_length, self.n_local_kv_heads, self.head_dim)
         value_states = value.transpose(0, 1).reshape(batch_size, q_length, self.n_local_kv_heads, self.head_dim)
 
         # Get cached key/values from store if available
         store = self.get_local_store()
         if store is not None:
-            # Double check that we use store only at inference time
             assert key_states.requires_grad is False
             assert value_states.requires_grad is False
             # Compute rotary embeddings
             if "position_offsets" in store:
                 old_position_offsets = store["position_offsets"]
                 position_ids = old_position_offsets[:, None] + sequence_mask
-
                 past_key_values_length = store["past_key_values_length"]
             else:
                 position_ids = torch.cumsum(sequence_mask, dim=-1, dtype=torch.int32) - 1
@@ -1002,14 +1050,10 @@ class CausalSelfGQA(nn.Module, AttachableStore):
 
             if "key" not in store:
                 # First inference iteration (Prefill)
-                # TODO @nouamane: support custom masking
-                # assert that [ False, False, False, False,  True,  True,  True,  True,  True,  True] is accepted
-                # but [ False, False, False, False,  True,  True,  False,  False,  True,  True] is not (can't mask in the middle of sequence)
                 assert ~(
-                    sequence_mask[:, :-1] & (~sequence_mask[:, 1:])  # True is never followed by False
-                ).any(), "Can't mask in the middle of sequence, please make sure that pads are at the left of the sequence if existing"
+                    sequence_mask[:, :-1] & (~sequence_mask[:, 1:])
+                ).any(), "Can't mask in the middle of sequence"
 
-                # preallocate k_cache, v_cache to self.prefill_kv_len
                 k_cache = torch.zeros(
                     (
                         batch_size,
@@ -1025,110 +1069,141 @@ class CausalSelfGQA(nn.Module, AttachableStore):
                     dtype=query_states.dtype,
                     device=query_states.device,
                 )
-                # Remove pad tokens from key_states and concatenate samples in key_unpad
-                # cu_seqlens_k is the cumulative sequence lengths of key_states
-                (query_unpad, indices_q, cu_seqlens_q, max_seqlen_q) = bert_padding.unpad_input(
-                    query_states,
-                    sequence_mask,
-                )
-                (key_unpad, indices_k, cu_seqlens_k, max_seqlen_k) = bert_padding.unpad_input(
-                    key_states, sequence_mask
-                )
-                (value_unpad, _, _, _) = bert_padding.unpad_input(value_states, sequence_mask)
 
-                output_unpad = flash_attn_varlen_func(
-                    q=query_unpad,  # (total_q, self.n_local_q_heads, d_qk)
-                    k=key_unpad,  # (total_kv, self.n_local_kv_heads, d_qk)
-                    v=value_unpad,  # (total_kv, self.n_local_kv_heads, d_v)
-                    cu_seqlens_q=cu_seqlens_q,
-                    cu_seqlens_k=cu_seqlens_k,
-                    max_seqlen_q=max_seqlen_q,
-                    max_seqlen_k=max_seqlen_k,
-                    dropout_p=0.0,
-                    softmax_scale=None,
-                    causal=True,  # True in prefill phase, False in subsequent phases
-                    return_attn_probs=False,
-                )  # (total_unpadded, n_local_q_heads, d_v)
+                if is_npu_available():
+                    # NPU branch: use SDPA directly
+                    q = query_states.transpose(1, 2).contiguous()
+                    k = key_states.transpose(1, 2).contiguous()
+                    v = value_states.transpose(1, 2).contiguous()
+                    attention_output = torch.nn.functional.scaled_dot_product_attention(
+                        q, k, v,
+                        attn_mask=None,
+                        dropout_p=0.0,
+                        scale=None,
+                        is_causal=True,
+                        enable_gqa=q.shape[1] != k.shape[1],
+                    )
+                    attention_output = attention_output.transpose(1, 2).contiguous()
+                else:
+                    from flash_attn import bert_padding
+                    from flash_attn.flash_attn_interface import flash_attn_varlen_func
 
-                attention_output = bert_padding.pad_input(
-                    output_unpad, indices_q, batch_size, q_length
-                )  # (batch_size, q_length, n_local_q_heads, d_v)
+                    (query_unpad, indices_q, cu_seqlens_q, max_seqlen_q) = bert_padding.unpad_input(
+                        query_states, sequence_mask,
+                    )
+                    (key_unpad, indices_k, cu_seqlens_k, max_seqlen_k) = bert_padding.unpad_input(
+                        key_states, sequence_mask
+                    )
+                    (value_unpad, _, _, _) = bert_padding.unpad_input(value_states, sequence_mask)
+
+                    output_unpad = flash_attn_varlen_func(
+                        q=query_unpad,
+                        k=key_unpad,
+                        v=value_unpad,
+                        cu_seqlens_q=cu_seqlens_q,
+                        cu_seqlens_k=cu_seqlens_k,
+                        max_seqlen_q=max_seqlen_q,
+                        max_seqlen_k=max_seqlen_k,
+                        dropout_p=0.0,
+                        softmax_scale=None,
+                        causal=True,
+                        return_attn_probs=False,
+                    )
+
+                    attention_output = bert_padding.pad_input(
+                        output_unpad, indices_q, batch_size, q_length
+                    )
 
                 pad_to_right(key_states, sequence_mask, new_tensor=k_cache)
                 pad_to_right(value_states, sequence_mask, new_tensor=v_cache)
 
             else:
-                # Pull pre-computed key/value states
-                # Subsequent inference iterations (q_length=1)
                 k_cache = store["key"]
                 v_cache = store["value"]
 
-                # [batch_size, seq_length, num_heads, d_qk]
                 query_states = query_states.view(
                     batch_size, q_length, self.n_local_q_heads, self.head_dim
-                )  # [batch_size, q_length, self.n_local_q_heads, self.head_dim]
+                )
                 kv_length = key_states.shape[1]
                 key_states = key_states.view(
                     batch_size, kv_length, self.n_local_kv_heads, self.head_dim
-                )  # [batch_size, kv_length, self.n_local_kv_heads, self.head_dim]
+                )
                 value_states = value_states.view(
                     batch_size, kv_length, self.n_local_kv_heads, self.head_dim
-                )  # [batch_size, kv_length, self.n_local_kv_heads, self.head_dim]
-
-                attention_output = flash_attn_with_kvcache(
-                    query_states,
-                    k_cache,
-                    v_cache,
-                    key_states,
-                    value_states,
-                    rotary_cos=None,
-                    rotary_sin=None,
-                    # TODO @nouamane: seems like this doesn't help to indicate padding in (for first iteration it's just 0)
-                    cache_seqlens=position_offsets.contiguous(),
-                    softmax_scale=None,
-                    causal=True,
-                    rotary_interleaved=False,  # GPT-NeoX style
                 )
+
+                if is_npu_available():
+                    # NPU branch: manual KV cache update + SDPA
+                    cache_seqlens = position_offsets
+                    for b in range(batch_size):
+                        offset = cache_seqlens[b].item()
+                        k_cache[b, offset:offset + kv_length] = key_states[b]
+                        v_cache[b, offset:offset + kv_length] = value_states[b]
+
+                    q = query_states.transpose(1, 2).contiguous()
+                    k = k_cache.transpose(1, 2).contiguous()
+                    v = v_cache.transpose(1, 2).contiguous()
+                    attention_output = torch.nn.functional.scaled_dot_product_attention(
+                        q, k, v,
+                        attn_mask=None,
+                        dropout_p=0.0,
+                        scale=None,
+                        is_causal=True,
+                        enable_gqa=q.shape[1] != k.shape[1],
+                    )
+                    attention_output = attention_output.transpose(1, 2).contiguous()
+                else:
+                    from flash_attn.flash_attn_interface import flash_attn_with_kvcache
+
+                    attention_output = flash_attn_with_kvcache(
+                        query_states,
+                        k_cache,
+                        v_cache,
+                        key_states,
+                        value_states,
+                        rotary_cos=None,
+                        rotary_sin=None,
+                        cache_seqlens=position_offsets.contiguous(),
+                        softmax_scale=None,
+                        causal=True,
+                        rotary_interleaved=False,
+                    )
 
             # Update store
             if past_key_values_length == 0:
-                past_key_values_length = sequence_mask.shape[1] - 1  # we add 1 when we load the value
+                past_key_values_length = sequence_mask.shape[1] - 1
             else:
                 past_key_values_length += 1
             store.update(
                 {
-                    "key": k_cache,  # flash-attn has updated with new key_states using cache_seqlens
+                    "key": k_cache,
                     "value": v_cache,
                     "position_offsets": position_offsets,
                     "past_key_values_length": past_key_values_length,
                 }
             )
         else:
-            # Apply rotary embeddings to query/key states
             query_states, key_states = self.maybe_rotary(query_states, key_states, past_key_values_length=0)
             q_sequence_mask = sequence_mask
             kv_sequence_mask = sequence_mask
 
             kv_length = key_states.shape[1]
-            # [batch_size, seq_length, num_heads, head_dim]
-            # Shaping for use in `flash-attn` version of flash-attn: `flash_attn_unpadded_func`
             query_states = query_states.reshape(
                 batch_size * q_length, self.n_local_q_heads, self.head_dim
-            )  # [batch_size * q_length, self.n_local_q_heads, head_dim]
-
+            )
             key_states = key_states.reshape(
                 batch_size * kv_length, self.n_local_kv_heads, self.head_dim
-            )  # [batch_size * kv_length, self.n_local_kv_heads, head_dim]
+            )
             value_states = value_states.reshape(
                 batch_size * kv_length, self.n_local_kv_heads, self.head_dim
-            )  # [batch_size * kv_length, self.n_local_kv_heads, head_dim]
+            )
             attention_output = self.attention(
                 query_states=query_states,
                 key_states=key_states,
                 value_states=value_states,
                 q_sequence_mask=q_sequence_mask,
                 kv_sequence_mask=kv_sequence_mask,
-            )  # [batch_size * seq_length, self.n_local_q_heads, head_dim]
+            )
 
         attention_output = attention_output.view(batch_size, q_length, self.n_local_q_heads * self.head_dim).transpose(
             0, 1

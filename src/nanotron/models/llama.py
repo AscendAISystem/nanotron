@@ -429,7 +429,7 @@ class CausalSelfAttention(nn.Module, AttachableStore):
         tp_pg: dist.ProcessGroup,
         layer_idx: int,
     ):
-        from flash_attn.layers.rotary import RotaryEmbedding as FlashRotaryEmbedding
+        from nanotron.npu_utils import is_npu_available
 
         super().__init__()
         # Tensor parallel considerations: We split tensors along head dimension
@@ -500,9 +500,19 @@ class CausalSelfAttention(nn.Module, AttachableStore):
         self.rope_interleaved = config.rope_interleaved
 
         # NOTE: Only supported for training (TODO(fmom): position_ids not supported yet)
-        self.flash_rotary_embedding = FlashRotaryEmbedding(
-            dim=self.d_qk, base=config.rope_theta, interleaved=config.rope_interleaved
-        )
+        if is_npu_available():
+            # On NPU, use the built-in RotaryEmbedding instead of flash_attn's version
+            self.flash_rotary_embedding = RotaryEmbedding(
+                dim=self.d_qk,
+                end=config.max_position_embeddings,
+                theta=config.rope_theta,
+            )
+        else:
+            from flash_attn.layers.rotary import RotaryEmbedding as FlashRotaryEmbedding
+
+            self.flash_rotary_embedding = FlashRotaryEmbedding(
+                dim=self.d_qk, base=config.rope_theta, interleaved=config.rope_interleaved
+            )
 
         self.o_proj = TensorParallelRowLinear(
             config.num_attention_heads * self.d_qk,
@@ -790,16 +800,30 @@ class CausalSelfAttention(nn.Module, AttachableStore):
         return {"hidden_states": output, "sequence_mask": sequence_mask}
 
     def _forward_training(self, query_states, key_states, value_states, sequence_mask, batch_size, q_length):
+        from nanotron.npu_utils import is_npu_available
+
         # Apply rotary embeddings to query/key states
         # NOTE: The layout is different from models/llama.py which is [batch_size, num_heads, seq_length, d_qk]
         # Here it is, [batch_size, seq_length, num_heads, d_qk]
-        # [2, batch_size, seq_length, num_heads, d_qk]
-        key_value_states = torch.cat([key_states.unsqueeze(0), value_states.unsqueeze(0)], dim=0)
-        # [batch_size, seq_length, 2, num_heads, d_qk]
-        key_value_states = key_value_states.permute(1, 2, 0, 3, 4).contiguous()
-        query_states, key_value_states = self.flash_rotary_embedding(query_states, kv=key_value_states)
-        # [batch_size, seq_length, num_heads, d_qk]
-        key_states, value_states = torch.split(key_value_states, 1, dim=2)
+
+        if is_npu_available():
+            # NPU path: use native RotaryEmbedding with separate Q/K application
+            if self.rope_interleaved:
+                # For the interleaved RotaryEmbedding, call it directly
+                query_states = self.flash_rotary_embedding(query_states)
+                key_states = self.flash_rotary_embedding(key_states)
+            else:
+                # For the non-interleaved LlamaRotaryEmbedding, use cos/sin
+                cos, sin = self.rotary_embedding(value_states, None)
+                query_states, key_states = self.rotary_embedding.apply_rotary_pos_emb(
+                    query_states, key_states, cos, sin
+                )
+        else:
+            # CUDA path: use flash_attn's fused rotary embedding
+            key_value_states = torch.cat([key_states.unsqueeze(0), value_states.unsqueeze(0)], dim=0)
+            key_value_states = key_value_states.permute(1, 2, 0, 3, 4).contiguous()
+            query_states, key_value_states = self.flash_rotary_embedding(query_states, kv=key_value_states)
+            key_states, value_states = torch.split(key_value_states, 1, dim=2)
 
         q_sequence_mask = sequence_mask
         kv_sequence_mask = sequence_mask
