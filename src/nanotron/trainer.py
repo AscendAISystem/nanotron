@@ -65,6 +65,7 @@ from nanotron.models.base import check_model_has_grad
 from nanotron.models.llama import LlamaForTraining, RotaryEmbedding
 from nanotron.models.qwen import Qwen2ForTraining
 from nanotron.models.starcoder2 import Starcoder2ForTraining
+from nanotron.npu_utils import get_device_handle
 from nanotron.optim.clip_grads import clip_grad_norm
 from nanotron.parallel import ParallelContext
 from nanotron.parallel.data_parallel.utils import sync_gradients_across_dp
@@ -546,7 +547,7 @@ class DistributedTrainer:
         prof = get_profiler(config=self.config)
         # free memory
         gc.collect()
-        torch.cuda.empty_cache()
+        get_device_handle().empty_cache()
         with prof:
             for self.iteration_step in range(self.initial_iter_step, self.last_iter_step + 1):
                 if isinstance(prof, torch.profiler.profile):
@@ -924,10 +925,10 @@ class DistributedTrainer:
             all_log_entries.extend(
                 [
                     LogItem(
-                        "cuda_memory_allocated", torch.cuda.memory_allocated(), "human_format"
+                        "cuda_memory_allocated", get_device_handle().memory_allocated(), "human_format"
                     ),  #  / 1024**2, ".2f"),
                     LogItem(
-                        "cuda_max_memory_reserved", torch.cuda.max_memory_reserved(), "human_format"
+                        "cuda_max_memory_reserved", get_device_handle().max_memory_reserved(), "human_format"
                     ),  #  / 1024**2, ".2f"),
                     LogItem("hd_total_memory_tb", total, "human_format"),  #  / (2**40), ".2f"),
                     LogItem("hd_used_memory_tb", used, "human_format"),  #  / (2**40), ".2f"),
@@ -1139,9 +1140,9 @@ class DistributedTrainer:
             rank=0,
         )
         log_rank(
-            f"[After model building] Memory usage: {torch.cuda.memory_allocated() / 1024**2:.2f}MiB."
-            f" Peak allocated: {torch.cuda.max_memory_allocated() / 1024**2:.2f}MiB"
-            f" Peak reserved: {torch.cuda.max_memory_reserved() / 1024**2:.2f}MiB",
+            f"[After model building] Memory usage: {get_device_handle().memory_allocated() / 1024**2:.2f}MiB."
+            f" Peak allocated: {get_device_handle().max_memory_allocated() / 1024**2:.2f}MiB"
+            f" Peak reserved: {get_device_handle().max_memory_reserved() / 1024**2:.2f}MiB",
             logger=logger,
             level=logging.INFO,
             group=parallel_context.dp_pg,

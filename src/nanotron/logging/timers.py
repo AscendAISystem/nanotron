@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import time
 from dataclasses import dataclass, field
@@ -8,6 +10,7 @@ import torch
 
 from nanotron import distributed as dist
 from nanotron import logging
+from nanotron.npu_utils import get_device_handle
 
 logger = logging.get_logger(__name__)
 
@@ -42,7 +45,7 @@ class TimerRecord:
 
     # CUDA specific fields
     _cuda_events: List[tuple[torch.cuda.Event, torch.cuda.Event]] = field(default_factory=list)
-    _current_start_event: Optional[torch.cuda.Event] = None
+    _current_start_event: Optional[torch.cuda.Event] = None  # type: ignore[valid-type]
 
     def __enter__(self):
         """Context manager support: Start the timer when entering a context."""
@@ -63,15 +66,16 @@ class TimerRecord:
             logger.warning(f"Timer '{self.name}' already running. Restarting.")
 
         if self.timer_type == TimerType.CUDA:
-            if torch.cuda.is_available():
+            device_handle = get_device_handle()
+            if device_handle.is_available():
                 # Synchronize before starting timing if requested
                 if self.cuda_sync:
-                    torch.cuda.synchronize()
+                    device_handle.synchronize()
                 # Create a new start event - we'll create the end event when end() is called
-                self._current_start_event = torch.cuda.Event(enable_timing=True)
+                self._current_start_event = device_handle.Event(enable_timing=True)
                 self._current_start_event.record()
             else:
-                logger.warning("CUDA timer requested but CUDA is not available. Falling back to CPU timer.")
+                logger.warning("CUDA timer requested but no GPU device is available. Falling back to CPU timer.")
                 self.timer_type = TimerType.CPU
                 self.start_time = time.time()
         else:
@@ -91,19 +95,20 @@ class TimerRecord:
             return
 
         if self.timer_type == TimerType.CUDA:
-            if torch.cuda.is_available() and self._current_start_event is not None:
+            device_handle = get_device_handle()
+            if device_handle.is_available() and self._current_start_event is not None:
                 # Synchronize before ending timing if requested
                 if self.cuda_sync:
-                    torch.cuda.synchronize()
+                    device_handle.synchronize()
                 # Create and record an end event
-                end_event = torch.cuda.Event(enable_timing=True)
+                end_event = device_handle.Event(enable_timing=True)
                 end_event.record()
 
                 # Store the start/end event pair for later querying
                 self._cuda_events.append((self._current_start_event, end_event))
                 self._current_start_event = None
             else:
-                logger.warning("CUDA timer end called but CUDA events are not available.")
+                logger.warning("CUDA timer end called but GPU events are not available.")
                 self.timer_type = TimerType.CPU
                 self.end_time = time.time()
                 self._cpu_total_time += self.end_time - self.start_time
@@ -142,11 +147,12 @@ class TimerRecord:
 
         # Timer is still running
         if self.timer_type == TimerType.CUDA:
-            if torch.cuda.is_available() and self._current_start_event is not None:
+            device_handle = get_device_handle()
+            if device_handle.is_available() and self._current_start_event is not None:
                 # Create a temporary end event to measure elapsed time so far
                 if self.cuda_sync:
-                    torch.cuda.synchronize()
-                tmp_end_event = torch.cuda.Event(enable_timing=True)
+                    device_handle.synchronize()
+                tmp_end_event = device_handle.Event(enable_timing=True)
                 tmp_end_event.record()
                 tmp_end_event.synchronize()
                 return self._current_start_event.elapsed_time(tmp_end_event) / 1000.0
