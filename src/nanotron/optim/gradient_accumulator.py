@@ -352,39 +352,19 @@ def get_fp32_accum_hook(
             fut.set_result(bucket.buffer())
             return fut
 
-        if reduce_scatter:
-            raise NotImplementedError("Not implemented")
-            assert hasattr(accumulator, "param_name_to_offsets")
-            grad_buffer_tensor_list = [
-                accumulator.get_grad_buffer(param_id_to_name[id(param)]).view(-1) for param in bucket.parameters()
-            ]
-            device = grad_buffer_tensor_list[0].device
-            dtype = grad_buffer_tensor_list[0].dtype
-            output_tensor_list = [
-                grad_buffer[slice(*accumulator.param_name_to_offsets[param_id_to_name[id(param)]])]
-                if param_id_to_name[id(param)] in accumulator.param_name_to_offsets
-                else torch.empty(0, dtype=dtype, device=device)
-                for grad_buffer, param in zip(grad_buffer_tensor_list, bucket.parameters())
-            ]
-            input_tensor_lists = [
-                torch.split(grad_buffer, split_size_or_sections=len(grad_buffer) // dp_pg.size())
-                for grad_buffer in grad_buffer_tensor_list
-            ]
-            dist.reduce_scatter_coalesced(
-                output_tensor_list=output_tensor_list,
-                input_tensor_lists=input_tensor_lists,
-                op=reduce_op,
-                group=dp_cp_pg,
-                async_op=True,
-            )
-        else:
-            grad_buffer_tensor_list = [
-                accumulator.get_grad_buffer(param_id_to_name[id(param)]).view(-1) for param in bucket.parameters()
-            ]
-            accumulator.fp32_grads_allreduce_handle = dist.all_reduce_coalesced(
-                grad_buffer_tensor_list, group=dp_cp_pg, async_op=True, op=reduce_op
-            )
-            # we shouldn't wait for this future for the rest of the backward
+        if False and reduce_scatter:
+            # NOTE: reduce_scatter path disabled (NotImplemented). Fall back to all_reduce below.
+            # Kept as reference for future optimization with ZeRO-1 gradient sharding.
+            pass
+
+        # Use all_reduce for gradient synchronization (works on both CUDA and NPU)
+        grad_buffer_tensor_list = [
+            accumulator.get_grad_buffer(param_id_to_name[id(param)]).view(-1) for param in bucket.parameters()
+        ]
+        accumulator.fp32_grads_allreduce_handle = dist.all_reduce_coalesced(
+            grad_buffer_tensor_list, group=dp_cp_pg, async_op=True, op=reduce_op
+        )
+        # we shouldn't wait for this future for the rest of the backward
 
         # with torch.cuda.stream(s):
         fut: torch.futures.Future[torch.Tensor] = torch.futures.Future()
