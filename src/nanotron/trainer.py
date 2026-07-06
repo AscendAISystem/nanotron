@@ -1068,19 +1068,20 @@ class DistributedTrainer:
 
                 # Synchronize parameters so that the model is consistent
                 # sync all params across dp
-                for _, param in sorted(model.named_parameters(), key=lambda x: x[0]):
-                    dist.all_reduce(param, op=dist.ReduceOp.AVG, group=self.parallel_context.dp_pg)
+                with torch.no_grad():
+                    for _, param in sorted(model.named_parameters(), key=lambda x: x[0]):
+                        dist.all_reduce(param, op=dist.ReduceOp.AVG, group=self.parallel_context.dp_pg)
 
-                # sync tied params across tied groups
-                for (_, group_ranks), param in sorted(
-                    get_tied_id_to_param(
-                        parameters=model.parameters(),
-                        root_module=unwrapped_model,
-                    ).items(),
-                    key=lambda x: x[0],
-                ):
-                    group = self.parallel_context.world_ranks_to_pg[group_ranks]
-                    dist.all_reduce(param, op=dist.ReduceOp.AVG, group=group)
+                    # sync tied params across tied groups
+                    for (_, group_ranks), param in sorted(
+                        get_tied_id_to_param(
+                            parameters=model.parameters(),
+                            root_module=unwrapped_model,
+                        ).items(),
+                        key=lambda x: x[0],
+                    ):
+                        group = self.parallel_context.world_ranks_to_pg[group_ranks]
+                        dist.all_reduce(param, op=dist.ReduceOp.AVG, group=group)
             else:
                 raise ValueError(f"Unsupported {self.config.model.init_method}")
 
